@@ -203,7 +203,7 @@ function removeRawElements(html, names, replacement) {
   let out = html;
   for (const name of names) {
     if (out.toLowerCase().indexOf('<' + name) < 0) continue;
-    const openRe = new RegExp('<' + name + '(?=[\\s>/])[^>]{0,3000}>', 'gi');
+    const openRe = new RegExp('<' + name + '(?=[\\s>/])[^<>]{0,2000}>', 'gi');
     const closeRe = new RegExp('</' + name + '\\s*>', 'gi');
     let res = '';
     let last = 0;
@@ -224,7 +224,7 @@ function removeRawElements(html, names, replacement) {
 function scanScripts(html) {
   html = toStr(html);
   const out = [];
-  const openRe = /<script(?=[\s>/])[^>]{0,3000}>/gi;
+  const openRe = /<script(?=[\s>/])[^<>]{0,2000}>/gi;
   const closeRe = /<\/script\s*>/gi;
   let m;
   while ((m = openRe.exec(html))) {
@@ -299,27 +299,38 @@ function scanElements(html, names, skipInner) {
   const openRe = new RegExp('<(' + names.map(escapeRe).join('|') + ')(?=[\\s>/])(' + ATTRS_SRC + ')>', 'gi');
   const closeRes = {};
   const noClose = {};
+  const lastClose = {}; // name -> { index, len }: the next closer found by the previous search (reused while still ahead)
   const out = [];
   let m;
   while ((m = openRe.exec(html))) {
     const name = m[1].toLowerCase();
     if (noClose[name]) continue;
     if (/\/\s*$/.test(m[2]) && name !== 'a') continue; // self-closing form, no content
-    const cre = closeRes[name] || (closeRes[name] = new RegExp('</' + escapeRe(name) + '\\s*>', 'gi'));
-    cre.lastIndex = m.index + m[0].length;
-    const c = cre.exec(html);
-    if (!c) { noClose[name] = true; continue; }
+    const from = m.index + m[0].length;
+    let c = null;
+    const lc = lastClose[name];
+    if (lc && lc.index >= from) {
+      c = lc;
+    } else {
+      const cre = closeRes[name] || (closeRes[name] = new RegExp('</' + escapeRe(name) + '\\s*>', 'gi'));
+      cre.lastIndex = from;
+      const found = cre.exec(html);
+      if (!found) { noClose[name] = true; continue; }
+      c = { index: found.index, len: found[0].length };
+      lastClose[name] = c;
+    }
+    const cEnd = c.index + c.len;
     out.push({
       name: name,
       attrStr: m[2],
       start: m.index,
       contentStart: m.index + m[0].length,
       contentEnd: c.index,
-      end: c.index + c[0].length,
+      end: cEnd,
       openTag: m[0],
       inner: html.slice(m.index + m[0].length, c.index)
     });
-    if (skipInner) openRe.lastIndex = c.index + c[0].length;
+    if (skipInner) openRe.lastIndex = cEnd;
   }
   return out;
 }
@@ -353,7 +364,7 @@ const INLINE_TAG_RE_SRC = '<\\/?(?:' + INLINE_TAGS.join('|') + ')(?=[\\s>/])' + 
 /** Visible text: scripts/styles/comments removed, inline tags removed, block tags -> space, entities decoded. */
 function visibleText(html, opts) {
   opts = opts || {};
-  let s = markupOf(html);
+  let s = opts.isMarkup ? toStr(html) : markupOf(html);
   s = s.replace(new RegExp(INLINE_TAG_RE_SRC, 'gi'), '');
   s = s.replace(new RegExp('<\\/?[a-zA-Z][a-zA-Z0-9:-]*(?=[\\s>/])' + ATTRS_SRC + '>', 'g'), ' ');
   s = decodeEntities(s);
@@ -503,9 +514,9 @@ function decideNewLink(href, opts, deadSet) {
 }
 
 /** Set of decoded href values of <a>/<area> tags (scripts and comments ignored). */
-function hrefSet(html) {
+function hrefSet(html, isMarkup) {
   const set = new Set();
-  forEachTag(markupOf(html), function (t) {
+  forEachTag(isMarkup ? toStr(html) : markupOf(html), function (t) {
     if (t.closing || (t.name !== 'a' && t.name !== 'area')) return;
     const a = parseAttrs(t.attrStr);
     if (Object.prototype.hasOwnProperty.call(a, 'href')) set.add(a.href.trim());
@@ -845,8 +856,11 @@ function isSourcesHeadingText(text) {
 function findSourcesSections(html) {
   const out = [];
   const heads = scanElements(html, ['h2', 'h3', 'h4'], true);
+  const noEnd = {};
+  let tried = 0;
   for (const h of heads) {
     if (!isSourcesHeadingText(visibleText(h.inner))) continue;
+    if (++tried > 10) break; // a real article has one Sources list; bound the work on broken input
     const leadRe = /(?:\s|<!--[\s\S]*?-->)*/y;
     leadRe.lastIndex = h.end;
     const lead = leadRe.exec(html);
@@ -854,8 +868,9 @@ function findSourcesSections(html) {
     const lm = /^<(ol|ul)(?=[\s>])/i.exec(html.slice(listStart, listStart + 8));
     if (!lm) continue;
     const listTag = lm[1].toLowerCase();
+    if (noEnd[listTag]) continue;
     const listEnd = elementEnd(html, listStart, listTag);
-    if (listEnd < 0) continue;
+    if (listEnd < 0) { noEnd[listTag] = true; continue; }
     out.push({ headingStart: h.start, headingEnd: h.end, listStart: listStart, listEnd: listEnd, listTag: listTag });
   }
   return out;
@@ -910,7 +925,7 @@ function sanitizeLinks(originalHtml, editedHtml, options, deadUrls) {
   const removed = [];
   const seenRemoved = new Set();
   const record = function (url, reason, where) {
-    const k = url + '\u0000' + reason;
+    const k = url + '\u0000' + reason + '\u0000' + (where || '');
     if (seenRemoved.has(k)) return;
     seenRemoved.add(k);
     removed.push(where ? { url: url, reason: reason, where: where } : { url: url, reason: reason });
@@ -964,7 +979,8 @@ function sanitizeLinks(originalHtml, editedHtml, options, deadUrls) {
     for (const a of anchors) {
       const attrs = parseAttrs(a.attrStr);
       if (!Object.prototype.hasOwnProperty.call(attrs, 'href')) continue;
-      const reason = decide(attrs.href);
+      let reason = decide(attrs.href);
+      if (!reason && !origHrefs.has(attrs.href.trim()) && /<img(?=[\s>\/])/i.test(a.inner)) reason = 'image_link';
       if (!reason) continue;
       record(attrs.href.trim(), reason);
       out += html.slice(pos, a.start) + a.inner;
@@ -1026,14 +1042,16 @@ function analyze(html) {
       for (let i = 0; i < BOX_TYPES.length; i++) if (boxRes[i].test(attrs.style)) boxes[BOX_TYPES[i].key]++;
     }
   });
+  // <style> elements are stripped from the markup view, so count them separately (outside scripts).
+  open.style = countMatches(stripComments(removeRawElements(html, ['script'], ' ')), /<style(?=[\s>\/])/gi);
   A.open = open;
   A.close = close;
   A.imgs = imgs;
   A.ids = ids;
   A.boxes = boxes;
   A.eventAttrs = eventAttrs;
-  A.hrefs = hrefSet(html);
-  A.text = visibleText(html);
+  A.hrefs = hrefSet(A.markup, true);
+  A.text = visibleText(A.markup, { isMarkup: true });
   A.words = countWords(A.text.replace(new RegExp(SHORTCODE_SRC, 'gi'), ' '));
   A.headings = scanElements(A.markupNoPlugin, ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'], true).map(function (h) {
     return { level: parseInt(h.name.charAt(1), 10), text: visibleText(h.inner), inner: h.inner };
@@ -1071,6 +1089,8 @@ function leadingItem(html) {
   let pos = 0;
   const n = html.length;
   const shortcodeRe = new RegExp(SHORTCODE_SRC, 'iy');
+  const noCloser = new Set();
+  const noEnd = new Set();
   for (let guard = 0; guard < 400 && pos < n; guard++) {
     const ws = /\S/g;
     ws.lastIndex = pos;
@@ -1083,7 +1103,7 @@ function leadingItem(html) {
       if (end < 0) return { kind: 'empty' };
       const raw = html.slice(pos, end + 3);
       const bm = /^<!--\s*wp:([a-z][a-z0-9_-]*\/[a-z][a-z0-9_-]*)/.exec(raw);
-      if (bm && !/\/\s*-->$/.test(raw)) {
+      if (bm && !/\/\s*-->$/.test(raw) && !noCloser.has(bm[1])) {
         const re = new RegExp('<!--\\s*(\\/?)wp:' + escapeRe(bm[1]) + '(?=[\\s/]|-->)', 'g');
         re.lastIndex = end + 3;
         let depth = 1;
@@ -1098,6 +1118,7 @@ function leadingItem(html) {
           re.lastIndex = e2 + 3;
           if (depth === 0) { closeEnd = e2 + 3; break; }
         }
+        if (closeEnd < 0) noCloser.add(bm[1]);
         pos = closeEnd > 0 ? closeEnd : end + 3;
       } else {
         pos = end + 3;
@@ -1111,6 +1132,12 @@ function leadingItem(html) {
       const c = cre.exec(html);
       if (!c) return { kind: 'empty' };
       pos = c.index + c[0].length;
+      continue;
+    }
+    if (head.charAt(0) === '<' && head.charAt(1) === '/') {
+      const gt = html.indexOf('>', pos);
+      if (gt < 0) return { kind: 'empty' };
+      pos = gt + 1;
       continue;
     }
     if (head.charAt(0) === '<') {
@@ -1132,8 +1159,8 @@ function leadingItem(html) {
         if (tag === 'br') { pos = vEnd; continue; }
         return { kind: 'element', tag: tag, raw: html.slice(pos, vEnd), isBox: false, text: '' };
       }
-      let end = elementEnd(html, pos, tag);
-      if (end < 0) end = Math.min(n, pos + 2000);
+      let end = noEnd.has(tag) ? -1 : elementEnd(html, pos, tag);
+      if (end < 0) { noEnd.add(tag); end = Math.min(n, pos + 2000); }
       const el = html.slice(pos, end);
       const inner = el.replace(/^<[^>]*>/, '');
       const text = visibleText(inner, { stripShortcodes: true });
@@ -1150,8 +1177,16 @@ function leadingItem(html) {
         if (sc) return { kind: 'shortcode', tag: 'p', key: sc[0], raw: short(el, 160) };
         return { kind: 'p', tag: 'p', raw: short(el, 160), text: plain };
       }
-      const style = /style\s*=\s*"([^"]*)"/i.exec(el.slice(0, 600));
-      const isBox = !!(style && /background(?:-color)?\s*:\s*#(eef3fe|fdf8e3|f5f7fa|fdeced|eafaf1|eef3f7)/i.test(style[1]));
+      const ot = new RegExp(TAG_SRC, 'y');
+      ot.lastIndex = pos;
+      const openTag = ot.exec(html);
+      const style = openTag ? parseAttrs(openTag[3]).style : '';
+      const isBox = !!(style && /background(?:-color)?\s*:\s*#(eef3fe|fdf8e3|f5f7fa|fdeced|eafaf1|eef3f7)/i.test(style));
+      if (!isBox && openTag && /^(div|section|article|main|center)$/.test(tag)) {
+        // Plain wrapper (e.g. a Group block): look at what it starts with.
+        pos = pos + openTag[0].length;
+        continue;
+      }
       return { kind: 'element', tag: tag, raw: el, isBox: isBox, text: text };
     }
     if (head.charAt(0) === '[') {
@@ -1328,7 +1363,9 @@ function validateArticle(originalHtml, editedHtml, options) {
 
   // --- Forbidden tags --------------------------------------------------------------------
   for (const t of FORBIDDEN_TAGS) {
-    const a = O.open[t] || 0;
+    let a = O.open[t] || 0;
+    // The original's leading H1 is the post title that must be deleted; it gives no allowance for another H1.
+    if (t === 'h1' && oLead.kind === 'element' && oLead.tag === 'h1') a = Math.max(0, a - 1);
     const b = E.open[t] || 0;
     if (b > a) error('FORBIDDEN_TAG', 'New <' + t + '> tag(s) added (' + (b - a) + ').');
   }
@@ -1401,7 +1438,10 @@ function validateArticle(originalHtml, editedHtml, options) {
 
   // --- Duplicate content --------------------------------------------------------------------
   const blockTexts = function (A) {
-    return scanElements(A.markup, ['p', 'li'], false).map(function (el) { return normalizeForMatch(visibleText(el.inner)); })
+    // Leaf paragraphs/items only (bounded size): broken or nested markup must not make this quadratic.
+    return scanElements(A.markup, ['p', 'li'], false)
+      .filter(function (el) { return el.contentEnd - el.contentStart <= 5000 && !/<(?:p|li)(?=[\s>\/])/i.test(el.inner); })
+      .map(function (el) { return normalizeForMatch(visibleText(el.inner, { isMarkup: true })); })
       .filter(function (t) { return countWords(t) >= 12; });
   };
   const dO = multiset(blockTexts(O));
@@ -1432,6 +1472,11 @@ function validateArticle(originalHtml, editedHtml, options) {
     const reason = decideNewLink(h, opts, deadSet);
     if (reason === 'internal') error('NEW_INTERNAL_LINK', 'New internal link: ' + short(h, 120));
     else if (reason) error('BAD_NEW_LINK', 'New link not allowed (' + reason + '): ' + short(h, 120));
+  }
+  for (const a of scanElements(E.markup, ['a'], true)) {
+    const attrs = parseAttrs(a.attrStr);
+    if (!Object.prototype.hasOwnProperty.call(attrs, 'href') || O.hrefs.has(attrs.href.trim())) continue;
+    if (/<img(?=[\s>\/])/i.test(a.inner)) error('BAD_NEW_LINK', 'New link wrapped around an image: ' + short(attrs.href, 120));
   }
   const newExternal = newLinks.filter(function (h) {
     const p = parseUrl(h);

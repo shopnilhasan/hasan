@@ -307,6 +307,25 @@ test('FIRST_ELEMENT: leading comments, scripts, empty paragraphs and plugin bloc
   assert.equal(V.validateArticle(o, lead + GOOD, OPTS).pass, true);
 });
 
+test('FIRST_ELEMENT: a plain wrapper div (Group block) is looked into; a box or heading inside still fails', () => {
+  const wrap = (x) => '<!-- wp:group -->\n<div class="wp-block-group"><div class="wp-block-group__inner-container">\n' + x + '\n</div></div>\n<!-- /wp:group -->';
+  const o = wrap(ORIG);
+  assert.equal(V._internal.leadingItem(wrap(GOOD)).kind, 'p');
+  assert.equal(V.validateArticle(o, wrap(GOOD), OPTS).pass, true);
+  expectError(V.validateArticle(o, wrap(GOOD.slice(GOOD.indexOf(QA_BOX_START))), OPTS), 'FIRST_ELEMENT_NOT_P');
+});
+
+test('BAD_NEW_LINK / sanitize: a new link wrapped around an existing image is unwrapped', () => {
+  const img = '<img decoding="async" loading="lazy" width="1024" height="683" src="https://tubetyre.com/wp-content/uploads/2024/05/tyre-pressure-gauge-1024x683.jpg"';
+  const i = GOOD.indexOf(img);
+  const j = GOOD.indexOf('/>', i) + 2;
+  const linked = GOOD.slice(0, i) + '<a href="https://www.tyresafe.org/">' + GOOD.slice(i, j) + '</a>' + GOOD.slice(j);
+  expectError(validate(linked), 'BAD_NEW_LINK');
+  const s = V.sanitizeLinks(ORIG, linked, OPTS);
+  assert.equal(s.html, GOOD);
+  assert.deepEqual(s.removed, [{ url: 'https://www.tyresafe.org/', reason: 'image_link' }]);
+});
+
 test('TITLE_IN_BODY (optional postTitle): a bold/plain title line at the top', () => {
   const t = '<!-- wp:paragraph -->\n<p><strong>How to Check Tyre Pressure at Home</strong></p>\n<!-- /wp:paragraph -->\n' + GOOD;
   expectError(validate(t, { postTitle: 'How to Check Tyre Pressure at Home' }), 'TITLE_IN_BODY');
@@ -418,7 +437,8 @@ test('BOX_DUPLICATED: a second Quick Answer box; BOX_LIMIT warning for a third P
   expectWarning(r, 'BOX_LIMIT');
   // limit follows the original's own count
   const o = ORIG + '\n' + qa + '\n' + qa;
-  assert.ok(!codes(V.validateArticle(o, GOOD + '\n' + qa + '\n' + qa.replace('Check your tyres when', 'Check tyres when'), OPTS).errors).includes('BOX_DUPLICATED'));
+  assert.ok(!codes(V.validateArticle(o, GOOD + '\n' + qa.replace('Check your tyres when', 'Check tyres when'), OPTS).errors).includes('BOX_DUPLICATED'));
+  expectError(V.validateArticle(o, GOOD + '\n' + qa + '\n' + qa, OPTS), 'BOX_DUPLICATED');
 });
 
 const NEW_FAQ = '<!-- wp:heading -->\n<h2 class="wp-block-heading">Frequently Asked Questions</h2>\n<!-- /wp:heading -->\n' +
@@ -533,7 +553,7 @@ test('sanitizeLinks: dead link unwrapped and its Sources <li> removed; other ite
   assert.ok(!r.html.includes('Dead Site'));
   assert.ok(r.html.includes('<h2 class="wp-block-heading">Sources</h2>'));
   assert.ok(r.html.includes(li('https://www.who.int/', 'WHO')));
-  assert.deepEqual(r.removed, [{ url: dead, reason: 'dead', where: 'sources' }]);
+  assert.deepEqual(r.removed, [{ url: dead, reason: 'dead', where: 'sources' }, { url: dead, reason: 'dead' }]);
 });
 
 test('sanitizeLinks: Sources section removed with its block comments when it becomes empty', () => {
@@ -765,7 +785,10 @@ test('processEditorOutput: dead new link => unwrapped, its Sources item removed,
   assert.ok(r.html.includes('The UK tyre safety charity TyreSafe also recommends a monthly check.'));
   assert.ok(r.html.includes('<h2 class="wp-block-heading">Sources</h2>'));
   assert.ok(r.html.includes('NHTSA: Tires'));
-  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['dead', 'dead']);
+  assert.deepEqual(r.removedLinks, [
+    { url: 'https://www.tyresafe.org/', reason: 'dead', where: 'sources' },
+    { url: 'https://www.tyresafe.org/', reason: 'dead' }
+  ]);
   assert.deepEqual(r.linkResults.map((x) => x.verdict), ['dead']);
 });
 
@@ -916,7 +939,12 @@ test('robustness: pathological 300 KB inputs finish fast (no catastrophic backtr
     lastChecked: rep('last checked '),
     markers: rep('<<<ARTICLE_HTML>>>'),
     nested: rep('<div><span><p>'),
-    fences: rep('```')
+    fences: rep('```'),
+    sourcesHeads: rep('<h2>Sources</h2><ol><li><a href="https://d.test/">x</a></li>'),
+    pluginPairs: rep('<!-- wp:x/y --><p>a</p><!-- /wp:x/y -->'),
+    listItems: rep('<li>'),
+    images: rep('<img src="a.jpg" alt="x">'),
+    attrsNoClose: '<img ' + rep('a=b ')
   };
   for (const [name, s] of Object.entries(cases)) {
     const t0 = process.hrtime.bigint();
@@ -926,7 +954,7 @@ test('robustness: pathological 300 KB inputs finish fast (no catastrophic backtr
     V.parseEditorOutput(s);
     await V.processEditorOutput(s, '<<<ARTICLE_HTML>>>\n' + s + '\n<<<META_JSON>>>\n{"status":"edited"}\n<<<END>>>', { checkLinks: false });
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    assert.ok(ms < 2500, name + ' took ' + ms.toFixed(0) + ' ms');
+    assert.ok(ms < 2000, name + ' took ' + ms.toFixed(0) + ' ms');
   }
 });
 
