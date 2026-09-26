@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Auto Post Updater Pro",
+  "version": "3.45.0",
+  "description": "Automated post updater with WordPress auto-connect, API mode, a reliable background batch engine, live settings, per-post retry, one-click test run, bulk parallel runs (up to 5 posts at once), chunked fast-submit cycles that submit a group, recover & update it, then automatically start the next group, a custom recovery-delay field, a unified Failed + Audit Retry Center, a dedicated FAQ/Conclusion-missing sub-box, clearly separated Successful/Audit/Failed result boxes, dual-save safety, one-click section navigation, a faster paste box, Clear-All plus a full Clear-Backups reset, auto-pause on repeated failures, truncation-proof completeness checks, ETA, finish notifications, and orphan-tab cleanup.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting",
+    "tabs",
+    "alarms",
+    "unlimitedStorage",
+    "notifications",
+    "power"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open Auto Post Updater Pro"
+  },
+  "options_ui": {
+    "page": "panel.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*",
+        "https://bard.google.com/*",
+        "https://aistudio.google.com/*",
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*",
+        "https://claude.ai/*",
+        "https://grok.com/*",
+        "https://x.com/i/grok*"
+      ],
+      "js": [
+        "keepalive.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    }
+  ]
+}

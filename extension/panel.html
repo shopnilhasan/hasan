@@ -1,0 +1,1156 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Auto Post Updater Pro</title>
+<style>
+/* ════════════════════════════════════════════════════════════════
+   Design system — Auto Post Updater Pro v3.8
+   ════════════════════════════════════════════════════════════════ */
+:root {
+  --bg: #0b0d10;
+  --bg-soft: #11141a;
+  --card: #14181f;
+  --card-2: #181d26;
+  --field: #1d232e;
+  --border: #262d3a;
+  --border-soft: #202634;
+  --text: #e9edf3;
+  --text-dim: #9aa5b5;
+  --text-faint: #6b7688;
+  --accent: #34c759;
+  --accent-strong: #2fb44f;
+  --accent-soft: rgba(52, 199, 89, 0.12);
+  --danger: #ff5566;
+  --danger-soft: rgba(255, 85, 102, 0.10);
+  --warn: #ffb340;
+  --warn-soft: rgba(255, 179, 64, 0.10);
+  --info: #62aaff;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 1px 2px rgba(0,0,0,.35), 0 8px 24px -12px rgba(0,0,0,.5);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  background:
+    radial-gradient(1200px 500px at 80% -200px, rgba(52,199,89,0.06), transparent 60%),
+    var(--bg);
+  color: var(--text);
+  padding: 20px 20px 96px;   /* bottom space for the sticky action bar */
+  min-height: 100vh;
+  font-size: 14px;
+}
+.container { max-width: 980px; margin: 0 auto; }
+
+/* ── Header ─────────────────────────────────────────────────── */
+.header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.header-icon {
+  width: 42px; height: 42px; border-radius: 11px;
+  background: linear-gradient(135deg, #4f8cff, #1d5fd8);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; color: #071227; font-size: 17px; letter-spacing: .5px;
+  box-shadow: 0 4px 14px -4px rgba(79,140,255,.55);
+}
+.header h1 { font-size: 19px; font-weight: 700; letter-spacing: .2px; }
+.header .ver {
+  font-size: 11px; color: var(--text-faint); background: var(--card);
+  border: 1px solid var(--border-soft); padding: 3px 8px; border-radius: 999px;
+}
+
+/* ── Tabs ───────────────────────────────────────────────────── */
+.tabs {
+  display: flex; gap: 4px; margin-bottom: 18px;
+  background: var(--card); border: 1px solid var(--border-soft);
+  padding: 4px; border-radius: 999px; width: max-content;
+  position: sticky; top: 12px; z-index: 40; box-shadow: var(--shadow);
+}
+.tab {
+  padding: 8px 18px; cursor: pointer; font-size: 13px; font-weight: 600;
+  color: var(--text-dim); border-radius: 999px; transition: all .15s ease;
+  user-select: none;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: #07130a; background: var(--accent); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Cards & sections ───────────────────────────────────────── */
+.card {
+  background: var(--card); padding: 18px; border-radius: var(--radius);
+  border: 1px solid var(--border-soft); margin-bottom: 14px; box-shadow: var(--shadow);
+}
+.card-title { font-size: 14px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.card-title .right { margin-left: auto; font-weight: 500; font-size: 12px; color: var(--text-dim); }
+.card-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; line-height: 1.55; }
+.step-chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; padding: 0 7px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 11px; font-weight: 800;
+}
+
+/* Collapsible settings groups (native <details> — no JS needed) */
+details.group {
+  background: var(--card); border: 1px solid var(--border-soft);
+  border-radius: var(--radius); margin-bottom: 14px; box-shadow: var(--shadow);
+  overflow: hidden;
+}
+details.group > summary {
+  list-style: none; cursor: pointer; padding: 14px 18px;
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13.5px; font-weight: 700; color: var(--text);
+  transition: background .15s ease;
+}
+details.group > summary:hover { background: var(--card-2); }
+details.group > summary::-webkit-details-marker { display: none; }
+details.group > summary .chev {
+  margin-left: auto; color: var(--text-faint); font-size: 11px;
+  transition: transform .2s ease;
+}
+details.group[open] > summary .chev { transform: rotate(90deg); }
+details.group > summary .hint { font-weight: 400; font-size: 11.5px; color: var(--text-faint); }
+details.group > .group-body { padding: 4px 18px 18px; border-top: 1px solid var(--border-soft); }
+details.group > .group-body .card-desc { margin-top: 10px; }
+
+/* ── Form controls ──────────────────────────────────────────── */
+label { display: block; font-size: 11.5px; color: var(--text-dim); margin-bottom: 5px; font-weight: 600; letter-spacing: .2px; }
+input[type=text], input[type=password], input[type=number], select, textarea {
+  width: 100%; padding: 9px 12px; background: var(--field); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13px; font-family: inherit; outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+select { cursor: pointer; appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239aa5b5' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center; padding-right: 30px;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(52,199,89,.15); }
+textarea { resize: vertical; min-height: 96px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55; }
+input[type="file"] { padding: 7px; font-size: 12px; color: var(--text-dim); }
+input[type="file"]::file-selector-button {
+  margin-right: 10px; padding: 6px 12px; border: none; border-radius: 7px;
+  background: var(--field); color: var(--text); font-weight: 600; font-size: 12px;
+  border: 1px solid var(--border); cursor: pointer;
+}
+
+.default-readout {
+  width: 100%; min-height: 40px; padding: 9px 12px;
+  background: var(--field); color: var(--text); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); font-size: 12.5px; display: flex; align-items: center;
+}
+.default-readout.missing { color: var(--danger); border-color: rgba(255,85,102,.4); background: var(--danger-soft); }
+
+/* ── Buttons ────────────────────────────────────────────────── */
+button {
+  padding: 9px 16px; background: var(--field); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: all .15s ease; font-family: inherit;
+}
+button:hover { background: #242b38; border-color: #303949; }
+button:active { transform: translateY(1px); }
+button:disabled { opacity: .38; cursor: not-allowed; transform: none; }
+.btn-primary { background: var(--accent); border-color: transparent; color: #07130a; }
+.btn-primary:hover { background: var(--accent-strong); }
+/* Save All Settings is BLUE so it never gets confused with the green Start Batch */
+#saveAllSettingsBtn { background: #4f8cff; border-color: transparent; color: #071227; }
+#saveAllSettingsBtn:hover { background: #6ea3ff; }
+.btn-danger { background: transparent; border-color: rgba(255,85,102,.45); color: var(--danger); }
+.btn-danger:hover { background: var(--danger-soft); border-color: var(--danger); }
+.btn-warn { background: transparent; border-color: rgba(255,179,64,.5); color: var(--warn); }
+.btn-warn:hover { background: var(--warn-soft); border-color: var(--warn); }
+.btn-mini { padding: 5px 10px; font-size: 11px; border-radius: 7px; }
+
+/* ── Layout helpers ─────────────────────────────────────────── */
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 130px; }
+.row .nogrow { flex: none; min-width: 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 12px; }
+.grid .full { grid-column: 1 / -1; }
+small { color: var(--text-faint); font-size: 11px; line-height: 1.5; }
+hr { border: none; border-top: 1px solid var(--border-soft); margin: 14px 0; }
+code { background: var(--field); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+
+/* ── Saved lists (sites / AIs / prompts) ────────────────────── */
+.site-item, .ai-item, .prompt-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 11px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); margin-bottom: 7px; background: var(--card-2);
+  transition: border-color .15s ease;
+}
+.site-item.active, .ai-item.active, .prompt-item.active {
+  border-color: rgba(52,199,89,.55); background: linear-gradient(0deg, var(--accent-soft), var(--accent-soft)), var(--card-2);
+}
+.site-info, .ai-info, .prompt-info { flex: 1; min-width: 0; }
+.site-name, .ai-name, .prompt-name { font-weight: 700; font-size: 13px; }
+.site-url, .ai-url, .prompt-preview { font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 2px; }
+.default-badge {
+  background: var(--accent); color: #07130a; font-size: 10px;
+  padding: 3px 8px; border-radius: 999px; font-weight: 800; letter-spacing: .3px;
+}
+.empty { padding: 22px; text-align: center; color: var(--text-faint); font-size: 12.5px; }
+/* Keep the Settings page SHORT: saved sites / AIs / prompts scroll inside a
+   capped box instead of stretching the page. */
+#wpList, #aiList, #promptList { max-height: 300px; overflow-y: auto; padding-right: 4px; }
+#wpList::-webkit-scrollbar, #aiList::-webkit-scrollbar, #promptList::-webkit-scrollbar { width: 9px; }
+#wpList::-webkit-scrollbar-thumb, #aiList::-webkit-scrollbar-thumb, #promptList::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+/* ── Progress ───────────────────────────────────────────────── */
+.progress-bar {
+  width: 100%; height: 24px; background: var(--field);
+  border-radius: 999px; overflow: hidden; position: relative; margin-bottom: 10px;
+  border: 1px solid var(--border-soft);
+}
+.progress-fill {
+  height: 100%; background: linear-gradient(90deg, #2fb44f, #4cd964);
+  transition: width .35s ease; border-radius: 999px; position: relative;
+}
+.progress-fill::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.18) 50%, transparent 70%);
+  background-size: 200% 100%; animation: shimmer 2.2s linear infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.progress-fill.error { background: linear-gradient(90deg, #c62828, #ef5350); }
+.progress-fill.success { background: linear-gradient(90deg, #2fb44f, #4cd964); }
+.progress-text {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px; font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.6);
+}
+.status-line {
+  font-size: 12.5px; color: var(--text-dim); margin-bottom: 12px; padding: 10px 12px;
+  background: var(--field); border-radius: var(--radius-sm); border: 1px solid var(--border-soft);
+}
+.status-line.error { background: var(--danger-soft); color: var(--danger); border-color: rgba(255,85,102,.35); }
+.status-line.success { background: var(--accent-soft); color: var(--accent); border-color: rgba(52,199,89,.35); }
+
+/* ── Log ────────────────────────────────────────────────────── */
+.log {
+  background: #0a0c10; border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); padding: 10px 12px; max-height: 300px; overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; line-height: 1.65;
+}
+.log::-webkit-scrollbar, .processed-list::-webkit-scrollbar { width: 9px; }
+.log::-webkit-scrollbar-thumb, .processed-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+.log-entry { padding: 2px 0; border-bottom: 1px solid rgba(38,45,58,.4); }
+.log-entry:last-child { border-bottom: none; }
+.log-time { color: var(--text-faint); margin-right: 8px; }
+.log-info { color: var(--text-dim); }
+.log-ok { color: #4cd964; }
+.log-err { color: var(--danger); }
+.log-warn { color: var(--warn); }
+.log-step { color: var(--info); }
+
+/* ── Failures & processed rows ──────────────────────────────── */
+.failure-item {
+  padding: 10px 12px; border: 1px solid rgba(255,85,102,.35); border-radius: var(--radius-sm);
+  background: var(--danger-soft); margin-top: 8px; font-size: 12px; line-height: 1.5;
+}
+.failure-item strong { color: var(--danger); }
+.failure-note { color: var(--warn); margin-top: 3px; }
+.processed-list { max-height: 430px; overflow-y: auto; margin-top: 10px; }
+.processed-item {
+  padding: 12px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-sm);
+  background: var(--card-2); margin-top: 9px; font-size: 12px; line-height: 1.5;
+  word-break: break-word;
+}
+.processed-item.updated { border-left-color: #2fb44f; }
+.processed-item.failed { border-left-color: var(--danger); }
+.processed-head { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.processed-title { flex: 1 1 220px; min-width: 0; font-size: 13px; color: var(--text); font-weight: 600; }
+.processed-status {
+  display: inline-flex; align-items: center; padding: 3px 9px;
+  border-radius: 999px; margin-right: 8px; font-size: 10px; font-weight: 800;
+  text-transform: uppercase; letter-spacing: .4px;
+}
+.processed-item.updated .processed-status { background: var(--accent); color: #07130a; }
+.processed-item.failed .processed-status { background: var(--danger); color: #1c060a; }
+.processed-meta { color: var(--text-faint); margin-top: 5px; }
+.processed-link {
+  display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 6px;
+  align-items: start; margin-top: 5px; color: var(--text-dim);
+}
+.processed-link a { color: var(--text); text-decoration-color: var(--text-faint); text-underline-offset: 2px; }
+.processed-link a:hover { color: #7ee787; }
+.processed-message {
+  margin-top: 8px; padding: 8px 10px; border-radius: 7px;
+  color: var(--text); background: rgba(255,255,255,.05);
+}
+.processed-item.failed .processed-message { background: rgba(239,83,80,.10); }
+.processed-remove { flex: none; padding: 5px 9px; font-size: 11px; border-radius: 7px; }
+/* ── Collapsible result rows (Successful / Audit / Failed boxes) ── */
+.pi-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; cursor: pointer; user-select: none; }
+.pi-head:hover .pi-slug { color: #7ee787; }
+.pi-slug { flex: 1 1 200px; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.pi-time { flex: none; color: var(--text-faint); font-size: 11px; }
+.pi-caret { flex: none; color: var(--text-faint); font-size: 11px; transition: transform .15s; }
+.processed-item.open .pi-caret { transform: rotate(90deg); }
+.pi-body { display: none; }
+.processed-item.open .pi-body { display: block; }
+.pi-badge { flex: none; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 99px; }
+.pi-badge.faq { background: rgba(239,83,80,.18); color: #ff8a8a; border: 1px solid rgba(239,83,80,.5); }
+.pi-badge.concl { background: rgba(255,167,38,.15); color: #ffc46b; border: 1px solid rgba(255,167,38,.45); }
+.pi-badge.count { background: rgba(239,83,80,.28); color: #ffb3b3; }
+.audit-mark { width: 16px; height: 16px; accent-color: #ef5350; flex: none; cursor: pointer; margin: 0; }
+.count-chip { background: var(--border); color: var(--text); font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 99px; margin-left: 6px; }
+
+/* ── Sticky action bar ──────────────────────────────────────── */
+.action-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
+  background: rgba(13, 16, 21, .92);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--border);
+  padding: 10px 20px;
+}
+.action-bar-inner {
+  max-width: 980px; margin: 0 auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+}
+.action-bar .spacer { flex: 1; }
+.batch-pill {
+  font-size: 11.5px; font-weight: 700; padding: 5px 12px; border-radius: 999px;
+  background: var(--field); border: 1px solid var(--border); color: var(--text-dim);
+  white-space: nowrap;
+}
+#msg {
+  padding: 8px 12px; border-radius: var(--radius-sm); font-size: 12px;
+  display: none; flex-basis: 100%; order: -1;
+}
+#msg.show { display: block; }
+#msg.ok { background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(52,199,89,.3); }
+#msg.err { background: var(--danger-soft); color: var(--danger); border: 1px solid rgba(255,85,102,.3); }
+
+/* ── Misc ───────────────────────────────────────────────────── */
+.prompt-text {
+  background: var(--field); border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  padding: 10px 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px; max-height: 170px; overflow-y: auto; white-space: pre-wrap;
+  word-break: break-word; color: var(--text-dim);
+}
+#slugCount { display: block; margin-top: 6px; color: #7ee787; font-weight: 600; font-size: 11.5px; }
+.settings-note {
+  display: flex; gap: 10px; align-items: flex-start;
+  background: var(--accent-soft); border: 1px solid rgba(52,199,89,.25);
+  border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12px; color: var(--text-dim);
+  margin-bottom: 14px; line-height: 1.5;
+}
+/* ── v3.13.0: sticky top shortcut navigation bar ── */
+.shortcut-bar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  background: var(--bg-soft); border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm); padding: 8px 10px; margin-bottom: 14px;
+  box-shadow: var(--shadow);
+}
+.shortcut-bar .sc-label { font-size: 11px; color: var(--text-faint); margin-right: 4px; font-weight: 600; }
+.shortcut-bar a {
+  font-size: 12px; color: var(--text-dim); background: var(--card);
+  border: 1px solid var(--border-soft); border-radius: 999px;
+  padding: 4px 11px; cursor: pointer; text-decoration: none; transition: all .15s ease; white-space: nowrap;
+}
+.shortcut-bar a:hover { color: var(--text); border-color: var(--border); }
+.shortcut-bar a.active { color: #07130a; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+/* ── v3.13.0: dual-save gate banner ── */
+.save-gate {
+  display: none; align-items: center; gap: 10px;
+  background: var(--warn-soft); border: 1px solid rgba(255,179,64,.35);
+  border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12px; color: var(--warn);
+  margin-bottom: 14px; line-height: 1.5; font-weight: 600;
+}
+.save-gate.show { display: flex; }
+/* ── v3.13.0: clearer result-box section accents ── */
+details.group.box-success > summary { border-left: 3px solid var(--accent); }
+details.group.box-audit   > summary { border-left: 3px solid var(--warn); }
+details.group.box-failed  > summary { border-left: 3px solid var(--danger); }
+.count-chip.c-success { background: var(--accent-soft); color: var(--accent); }
+.count-chip.c-audit   { background: var(--warn-soft); color: var(--warn); }
+.count-chip.c-failed  { background: var(--danger-soft); color: var(--danger); }
+.clear-all-wrap { margin: 18px 0 6px; text-align: center; }
+.clear-all-wrap .btn-danger { min-width: 220px; }
+.clear-all-wrap small { display:block; margin-top:6px; color: var(--text-faint); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <div class="header-icon">AP</div>
+    <h1>Auto Post Updater Pro</h1>
+    <span class="ver" id="verLabel">v3.13.0</span>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="run">▶ Run Batch</div>
+    <div class="tab" data-tab="settings">⚙ Settings</div>
+    <div class="tab" data-tab="backup">💾 Backup</div>
+  </div>
+
+  <!-- ═══════════════════ RUN BATCH TAB ═══════════════════ -->
+  <div class="tab-content active" id="tab-run">
+
+    <!-- Sticky one-click shortcut navigation (v3.13.0) -->
+    <nav class="shortcut-bar" id="shortcutBar" aria-label="Section shortcuts">
+      <span class="sc-label">Jump to</span>
+      <a data-sc="sec-run">Run behaviour</a>
+      <a data-sc="sec-config">Configuration</a>
+      <a data-sc="sec-posts">Posts to Update</a>
+      <a data-sc="sec-fast">Fast Submit</a>
+      <a data-sc="sec-audit">Audit Issues</a>
+      <a data-sc="sec-faq">FAQ/Conclusion</a>
+      <a data-sc="sec-failed">Failed Posts</a>
+      <a data-sc="sec-retry">Retry Center</a>
+      <a data-sc="sec-logs">Logs / Activity</a>
+      <a data-sc="sec-backups">Backups</a>
+    </nav>
+
+    <!-- Live general progress summary (v3.23.0): a post counts as Done only
+         when it reaches a FINAL state — Successful, Audit Issues, or Failed. -->
+    <style>
+      .progress-summary { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 2px 4px; }
+      .ps-chip { display:inline-flex; gap:6px; align-items:center; padding:4px 12px; border-radius:999px;
+                 font-size:12.5px; font-weight:600; border:1px solid rgba(255,255,255,0.14);
+                 background:rgba(255,255,255,0.04); color:var(--text, #dfe6ee); white-space:nowrap; }
+      .ps-chip b { font-size:13.5px; }
+      .ps-total { border-color:#3b82f6; color:#9cc3ff; }
+      .ps-done  { border-color:rgba(255,255,255,0.30); }
+      .ps-left  { opacity:.85; }
+      .ps-ok    { border-color:#22c55e; color:#7fe3a1; }
+      .ps-audit { border-color:#f59e0b; color:#ffd28a; }
+      .ps-fail  { border-color:#ef4444; color:#ff9d9d; }
+      .ps-sub   { border-color:#a78bfa; color:#cdbcff; }
+      .ps-idle  { opacity:.7; font-weight:500; }
+      .ps-phase { opacity:.65; font-weight:500; font-size:11.5px; border-style:dashed; }
+    </style>
+    <!-- Loud, unmissable stop banner for an AI model limit (v3.28.0) -->
+    <div id="limitAlertBar" role="alert" style="display:none;margin:10px 2px;padding:12px 16px;border-radius:10px;
+         border:2px solid #ef4444;background:rgba(239,68,68,0.12);color:#ffb4b4;font-size:13.5px;line-height:1.5;">
+      <div style="display:flex;gap:10px;align-items:flex-start;">
+        <span style="font-size:18px;line-height:1;">⛔</span>
+        <div style="flex:1;">
+          <div style="font-weight:800;color:#ff8a8a;margin-bottom:3px;" id="limitAlertTitle">STOPPED — AI limit reached</div>
+          <div id="limitAlertText"></div>
+        </div>
+        <button id="limitAlertResume" class="btn-primary nogrow" style="display:none;padding:3px 12px;font-size:12px;">▶ Resume now</button>
+        <button id="limitAlertDismiss" class="nogrow" style="padding:3px 10px;font-size:12px;">Dismiss</button>
+      </div>
+    </div>
+
+    <div class="progress-summary" id="progressSummary" aria-live="polite">
+      <span class="ps-chip ps-idle">No batch running</span>
+    </div>
+    <div class="progress-summary" style="margin:0 2px 10px;">
+      <button id="emergencyStopBtn" class="btn-danger nogrow" style="padding:5px 14px;font-size:12.5px;font-weight:800;">🛑 EMERGENCY STOP</button>
+      <button id="everythingClearBtn" class="btn-danger nogrow" style="padding:5px 14px;font-size:12.5px;">🧨 Everything Clear</button>
+      <small style="color:var(--text-faint);font-size:11.5px;"><b>🛑 Emergency stop</b> halts everything the instant you press it — the running post, every queued post, all retry/reset timers, any scheduled Fast Submit, and it closes the AI tabs. Always available, no confirmation. Finished posts stay updated; unfinished ones stay in "Posts to update".<br><b>🧨 Everything Clear</b> is the <b>start completely fresh</b> button. Clears the pasted slugs/URLs in "Posts to update", every result and counter, the Successful / Audit / Failed lists, retry data, logs and activity, and any scheduled or queued Fast Submit. Keeps only your setup: sites, AIs, prompts and settings. Disabled while a run is active — press Stop first.</small>
+    </div>
+
+    <!-- Dual-save gate banner (v3.13.0) -->
+    <div class="save-gate" id="saveGate">
+      <span>⚠</span><span id="saveGateText">Save Configuration and Save All Settings before starting any work.</span>
+    </div>
+
+    <!-- 1 · Setup overview -->
+    <details class="group" id="sec-run">
+      <summary><span class="step-chip">1</span> Run behaviour
+        <span class="hint">background window, session backups</span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="grid" style="margin-top:12px;">
+          <div>
+            <label>Run location</label>
+            <select id="backgroundMode">
+              <option value="on">Background — keep working in other tabs (recommended)</option>
+              <option value="off" selected>Foreground — bring AI tabs to the front (classic)</option>
+            </select>
+            <small style="display:block;margin-top:6px;">Background mode runs AI tabs in a separate window that never steals focus. Leave that window open and don't minimize it.</small>
+            <div class="card-desc" style="margin-top:8px;border-left:3px solid #f0a020;padding-left:10px;"><b>Running with Chrome minimized?</b> Chrome stops laying out and stops the timers of a window that is minimized or completely covered — that is a browser rule, not a setting, and it is why Gemini stalls or fails. The extension now works around it (it keeps the page&#39;s frame, resize and visibility callbacks turning over from the background, and restores a window it finds minimized). For a <b>permanent</b> fix on a portable Chrome, add these switches to the shortcut or .bat you launch it with:<br><code style="display:block;margin-top:6px;padding:6px;background:rgba(0,0,0,.06);border-radius:4px;word-break:break-all;">--disable-backgrounding-occluded-windows --disable-background-timer-throttling --disable-renderer-backgrounding</code><span style="display:block;margin-top:6px;">With those, a minimized Chrome runs exactly as fast as a visible one, and the window is never pulled back to the front.</span></div>
+          </div>
+          <div>
+            <label>Auto-download a session ZIP after each task</label>
+            <select id="autoSessionZip">
+              <option value="on" selected>On</option>
+              <option value="off">Off</option>
+            </select>
+            <small style="display:block;margin-top:6px;">A folder of this task's original article HTML — your automatic undo copy.</small>
+          </div>
+          <div>
+            <label>🛡 AI limit handling</label>
+            <select id="limitMode">
+              <option value="smart" selected>Smart — pause the moment any limit appears, resume by itself (default)</option>
+              <option value="pause">Pause only — wait for me to press Resume</option>
+              <option value="off">Off — keep going even when the AI is limited</option>
+            </select>
+            <small style="display:block;margin-top:6px;">One switch for every kind of AI limit: a usage/message cap, a model cap, a silent downgrade to a smaller model (ChatGPT's "responses will use GPT-5 mini…"), and Gemini hiding Flash so only Flash-Lite is left.<br>
+            <b>Smart</b> — the run <b>pauses on the exact post it was about to send</b> (never sent, never failed, keeps its place), you get an alert, and it <b>resumes by itself at the reset time the AI states</b> ("resets at 3:00 PM", "try again in 2 hours"). If no time is given it waits the fallback below. <b>Resume</b> always works immediately.<br>
+            <b>Pause only</b> — same detection and alert, but it waits for you.<br>
+            <b>Off</b> — nothing is checked; posts may be edited by a limited or downgraded model. Not recommended.</small>
+          </div>
+          <div>
+            <label>⏰ If no reset time is given, wait</label>
+            <select id="limitFallbackHours">
+              <option value="0" selected>Don't retry — wait for Resume (default)</option>
+              <option value="1">1 hour</option>
+              <option value="2">2 hours</option>
+              <option value="3">3 hours</option>
+              <option value="5">5 hours</option>
+              <option value="8">8 hours</option>
+              <option value="12">12 hours</option>
+              <option value="24">24 hours</option>
+            </select>
+            <small style="display:block;margin-top:6px;">Only used with <b>Smart</b>, and only when the AI does <i>not</i> say when access returns. If the limit is still there when the wait ends, it pauses again and waits the same time once more — repeating until posts succeed or you press Stop. Keep Chrome open for an automatic retry.</small>
+          </div>
+          <div>
+            <label>🔁 Stop after this many failures in a row</label>
+            <select id="failStopCount">
+              <option value="0">Never stop — keep trying every post</option>
+              <option value="3">3 failures in a row</option>
+              <option value="5" selected>5 failures in a row (default)</option>
+              <option value="10">10 failures in a row</option>
+              <option value="20">20 failures in a row</option>
+            </select>
+            <small style="display:block;margin-top:6px;">Single failures never stop the run — the post goes to Failed and the batch moves on. This only reacts to a <b>run</b> of failures, which means something systemic (login, AI page change, network). Pick <b>Never stop</b> to always keep going.</small>
+          </div>
+          <div>
+            <label>⏱ Auto-retry after a failure stop</label>
+            <select id="failRetryAfter">
+              <option value="0">Manual — stay paused until I press Resume</option>
+              <option value="5">Retry after 5 minutes</option>
+              <option value="15">Retry after 15 minutes</option>
+              <option value="30">Retry after 30 minutes</option>
+              <option value="60" selected>Retry after 1 hour (default)</option>
+              <option value="120">Retry after 2 hours</option>
+            </select>
+            <small style="display:block;margin-top:6px;">After a failure stop the run <b>resumes by itself</b> when this time is up — no clicking needed. If the very next post fails again, it pauses again and retries after the same interval, over and over, until posts start succeeding or you press Stop. Keep Chrome open.</small>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div class="card" id="sec-config">
+      <div class="card-title"><span class="step-chip">2</span> Configuration
+        <span class="right">pick the site, AI and prompt right here — no Settings trip needed</span>
+      </div>
+      <div class="grid">
+        <div>
+          <label>WordPress Site</label>
+          <select id="runSiteSelect"></select>
+        </div>
+        <div>
+          <label>AI Service</label>
+          <select id="runAISelect"></select>
+        </div>
+        <div>
+          <label>Prompt</label>
+          <select id="runPromptSelect"></select>
+        </div>
+        <div>
+          <label>⚡ Posts at the same time</label>
+          <select id="parallelCount">
+            <option value="1">1 — one by one (classic)</option>
+            <option value="2">2 at once</option>
+            <option value="3">3 at once</option>
+            <option value="4">4 at once</option>
+            <option value="5">5 at once (max)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center;">
+        <button id="saveRunConfigBtn" class="btn-primary nogrow">💾 Save Configuration</button>
+        <small style="flex:none;color:var(--text-faint);">Your picks save instantly and also become the defaults in Settings.</small>
+      </div>
+      <details style="margin-top:12px;">
+        <summary style="cursor:pointer;font-size:12px;color:var(--text-dim);font-weight:600;">Show selected prompt preview</summary>
+        <div class="prompt-text" id="promptPreview" style="margin-top:8px;">—</div>
+      </details>
+    </div>
+
+    <!-- 2 · Slugs -->
+    <div class="card" id="sec-posts">
+      <div class="card-title"><span class="step-chip">3</span> Posts to update</div>
+      <label>Paste slugs or URLs — one per line</label>
+      <textarea id="slugTextarea" placeholder="hotel-check-in-times-when-can-you-arrive
+how-to-disable-pre-collision-system-camry
+https://yoursite.com/some-other-post/"></textarea>
+      <small id="slugCount"></small>
+      <small>Lines can be slugs (<code>my-post-slug</code>) or full URLs — the slug is extracted automatically. Empty lines and lines starting with <code>#</code> are ignored.</small>
+      <hr>
+      <label>Or load from a file</label>
+      <div class="row">
+        <input type="file" id="slugFile" accept=".txt,.csv" style="flex:2;">
+        <button id="loadFileBtn" class="nogrow">📂 Load File</button>
+      </div>
+      <small>Supports <b>.txt</b> (one slug per line) and <b>.csv</b> (first column = slug). For Excel: save as CSV first.</small>
+    </div>
+
+    <!-- 🚀 Fast Submit + Timed Recovery -->
+    <details class="group" id="sec-fast">
+      <summary>🚀 Fast Submit + Timed Recovery
+        <span class="hint">send all prompts now, collect &amp; update later</span><span class="count-chip" id="fastQueueChip"></span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;"><b>Phase 1 — 🚀 Fast Submit:</b> for every post above, the extension opens the AI, pastes the prompt + article, presses send, verifies and saves the real conversation link, and <b>closes the tab immediately — no waiting</b> for the AI to write (it keeps writing on the AI's servers). <b>Phase 2 — ⏰ Recovery:</b> at the time you set (or when you press the button), each saved chat is reopened one by one, the finished HTML is collected, and the related post is updated. Web AI providers only. <b>ChatGPT: Temporary Chat/history-off must be disabled so a durable <code>/c/…</code> link can be created. Gemini works differently: it discards a chat whose first reply is cut off, so Gemini tabs are NOT closed right after sending — up to 3 tabs stay open in a pipeline while the next posts are submitted, and each tab closes only after its reply finishes and its link survives a reload check. "Gemini Apps Activity" must be ON and the right Google account logged in; if a finished chat still vanishes, the batch pauses immediately with instructions. Before every Gemini send the model is strictly locked to <b>Flash + Extended thinking</b> — if that cannot be verified, that post fails and the batch keeps going.</b> Keep Chrome open — you <i>can</i> minimize it: every AI tab is kept awake so Chrome's background throttling cannot stall or slow the replies.</div>
+        <div class="row" style="align-items:center;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;">
+            <input type="checkbox" id="fastManual" style="width:auto;margin:0;"> 🙋 Recover myself (manual)
+          </label>
+          <small style="flex:1;min-width:200px;color:var(--text-faint);"><b>On:</b> submit <b>ALL</b> posts at once — no auto timer and no per-cycle system. Then press <b>“⏰ Recover &amp; Update Now”</b> yourself whenever you like. <b>Off:</b> use the Recovery delay and Posts-per-cycle settings below.</small>
+        </div>
+        <div class="row" style="align-items:center;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">Posts per cycle
+            <input type="number" id="fastChunkSize" min="1" max="2000" step="1" value="50" style="width:90px;">
+          </label>
+          <small style="flex:1;min-width:200px;color:var(--text-faint);">Submit and fully recover this many posts before starting the next group. Range 1–2000 (default 50). With more posts than this, Fast Submit runs in automatic cycles: submit a group → wait → recover &amp; update it → then start the next group by itself. <b>Ignored when “Recover myself” is on.</b></small>
+        </div>
+        <div class="row" style="align-items:center;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">Recovery delay (minutes)
+            <input type="number" id="fastRecoverAfter" min="1" max="500" step="1" value="10" style="width:90px;">
+          </label>
+          <small style="flex:1;min-width:200px;color:var(--text-faint);">Whole minutes, 1–500 (default 10). Each group waits this long before recovery starts automatically. "⏰ Recover &amp; Update Now" runs immediately without waiting.</small>
+          <button id="fastSubmitBtn" class="btn-primary nogrow">🚀 Fast-Submit All Posts</button>
+        </div>
+        <div class="row" style="align-items:center;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">⏳ Start after (minutes)
+            <input type="number" id="fastStartAfter" min="0" max="500" step="1" value="0" style="width:90px;">
+          </label>
+          <small style="flex:1;min-width:200px;color:var(--text-faint);"><b>0 = start immediately</b> (default). Set 1–500 minutes and pressing <b>🚀 Fast-Submit All Posts</b> only <i>schedules</i> the run — it then begins on its own after that time. Nothing is sent until then, and the countdown survives closing this panel. Cancel it with <b>✖ Cancel schedule</b>. Fast Submit only.</small>
+        </div>
+        <div class="row" style="align-items:center;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">Prompt paste wait (seconds)
+            <input type="number" id="fastPasteWait" min="1" max="600" step="1" value="10" style="width:90px;">
+          </label>
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">Paste retries
+            <select id="fastPasteRetries" style="width:auto;">
+              <option value="1">1 — paste once, no retry</option>
+              <option value="2">2 attempts</option>
+              <option value="3" selected>3 attempts (default)</option>
+            </select>
+          </label>
+          <small style="flex:1;min-width:200px;color:var(--text-faint);">If the prompt does not paste completely, Fast Submit clears the box and pastes again up to this many times before failing the post. Nothing is ever sent on a failed paste. Wait after paste verification before pressing Send: default 10 seconds (1–600). The countdown starts only once the <b>complete</b> prompt + article is confirmed inside the composer — never while it is empty or half-pasted. Applies to <b>Fast Submit only</b>; Start Batch timing is unchanged. Pause freezes the countdown and Stop cancels it without sending.</small>
+        </div>
+        <div class="row" style="align-items:center;margin-top:8px;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">Any-code recovery
+            <select id="fastAnyCode" style="width:auto;">
+              <option value="off">Off — follow all safety rules</option>
+              <option value="on">On — accept ANY code found and update</option>
+            </select>
+          </label>
+          <small style="flex:1;min-width:200px;color:var(--text-faint);"><b>Off:</b> recovery only saves a complete, verified article (incomplete code fails the post). <b>On:</b> recovery takes whatever HTML code the chat contains — even short or partial — and updates the post anyway. The post-save audit still reports anything missing. You can switch this any time before recovery starts.</small>
+        </div>
+        <div class="row" style="align-items:center;margin-top:8px;">
+          <button id="fastRecoverNowBtn" class="btn-warn nogrow">⏰ Recover &amp; Update Now</button>
+          <button id="fastCancelBtn" class="nogrow">✖ Cancel schedule</button>
+          <button id="fastClearBtn" class="btn-danger nogrow">🗑 Clear queue</button>
+        </div>
+        <div class="status-line" id="fastQueueStatus" style="margin-top:10px;">No prompts waiting.</div>
+      </div>
+    </details>
+
+
+    <!-- 3 · Settings groups -->
+    <details class="group">
+      <summary><span class="step-chip">4</span> Timing &amp; waits
+        <span class="hint">delays, timeouts, paste wait</span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="grid" style="margin-top:12px;">
+          <div>
+            <label>Delay between posts</label>
+            <select id="delayBetween">
+              <option value="0">No delay (fastest)</option>
+              <option value="3">3 seconds</option>
+              <option value="5">5 seconds</option>
+              <option value="10" selected>10 seconds (recommended)</option>
+              <option value="30">30 seconds</option>
+              <option value="60">1 minute</option>
+              <option value="120">2 minutes</option>
+            </select>
+          </div>
+          <div>
+            <label>AI response timeout</label>
+            <select id="aiTimeout">
+              <option value="120">2 minutes</option>
+              <option value="180">3 minutes</option>
+              <option value="300">5 minutes</option>
+              <option value="600">10 minutes</option>
+              <option value="900">15 minutes</option>
+              <option value="1800" selected>30 minutes</option>
+              <option value="2700">45 minutes</option>
+              <option value="3600">60 minutes</option>
+              <option value="nolimit">No limit — wait until the AI finishes</option>
+              <option value="custom">Custom…</option>
+            </select>
+            <input type="number" id="aiTimeoutCustom" min="1" max="120" value="5" placeholder="Minutes (1-120)" style="display:none; margin-top:6px;">
+          </div>
+          <div>
+            <label>Wait after UPDATE click (editor mode)</label>
+            <select id="updateWait">
+              <option value="10">10 seconds</option>
+              <option value="20">20 seconds</option>
+              <option value="30" selected>30 seconds (recommended)</option>
+              <option value="60">60 seconds</option>
+              <option value="custom">Custom…</option>
+            </select>
+            <input type="number" id="updateWaitCustom" min="5" max="300" value="45" placeholder="Seconds (5-300)" style="display:none; margin-top:6px;">
+          </div>
+          <div>
+            <label>Settle time after AI completes</label>
+            <select id="settleTime">
+              <option value="2">2 seconds (fast)</option>
+              <option value="3">3 seconds</option>
+              <option value="5">5 seconds (safe)</option>
+              <option value="10" selected>10 seconds (extra safe)</option>
+            </select>
+          </div>
+          <div>
+            <label>Wait after pasting prompt (before send)</label>
+            <select id="pasteWait">
+              <option value="1">1 second (fast)</option>
+              <option value="2">2 seconds</option>
+              <option value="3">3 seconds (safer for big prompts)</option>
+              <option value="5">5 seconds</option>
+              <option value="10">10 seconds</option>
+              <option value="custom" selected>Custom…</option>
+            </select>
+            <input type="number" id="pasteWaitCustom" min="1" max="30" value="30" placeholder="Seconds (1-30)" style="display:none; margin-top:6px;">
+          </div>
+          <div>
+            <label>If a post is not found</label>
+            <select id="onMissing">
+              <option value="skip" selected>Skip and continue</option>
+              <option value="stop">Stop the batch</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary><span class="step-chip">5</span> Safety &amp; completeness
+        <span class="hint">what counts as a full article</span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="grid" style="margin-top:12px;">
+          <div>
+            <label>Article completeness check</label>
+            <select id="completeness">
+              <option value="balanced" selected>Balanced — full structure + ≥85% length (recommended)</option>
+              <option value="strict">Strict — full structure + ≥92% + all sections</option>
+              <option value="off">Off — accept any non-empty HTML</option>
+            </select>
+          </div>
+          <div>
+            <label>Auto-split very large articles (experimental)</label>
+            <select id="autoSplit">
+              <option value="off" selected>Off</option>
+              <option value="on">On — edit big articles in section-sized parts</option>
+            </select>
+          </div>
+        </div>
+        <div class="card-desc" style="margin-top:10px;">An article that fails these checks is <b>never saved</b> — the live post stays untouched and the row lands in Failed Posts for retry.</div>
+        <!-- legacy hidden controls (still read by the engine) -->
+        <input type="hidden" id="strictMode" value="loose">
+        <div style="display:none;">
+          <select id="extraPrompts">
+            <option value="0" selected>Off</option>
+            <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+          </select>
+          <select id="apiMaxTokens">
+            <option value="16000" selected>16,000</option>
+            <option value="32000">32,000</option>
+            <option value="64000">64,000</option>
+            <option value="100000">100,000</option>
+          </select>
+        </div>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary><span class="step-chip">6</span> Retry &amp; recovery
+        <span class="hint">failed posts, audit issues, fallback AI</span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;"><b>Failed posts</b> — when a post fails to generate or save, Step&nbsp;1 reopens the saved AI session and re-reads the code it already produced; Step&nbsp;2 retries in a brand-new AI session.</div>
+        <div class="grid">
+          <div>
+            <label>Step 1 · Recover from the failed AI session</label>
+            <select id="htmlRecoveryFailed">
+              <option value="off" selected>Off — don't recover</option>
+              <option value="on">On — reopen the chat and re-read the code</option>
+            </select>
+          </div>
+          <div>
+            <label>Step 2 · Retry in a new AI session</label>
+            <select id="retryMode">
+              <option value="end" selected>Yes — retry at the END of the batch (recommended)</option>
+              <option value="inline">Yes — retry right away</option>
+              <option value="off">No — just mark the post as failed</option>
+            </select>
+          </div>
+          <div>
+            <label>New-session retries per post</label>
+            <select id="maxRetries">
+              <option value="0">0 — no retries</option>
+              <option value="1">1 retry</option>
+              <option value="2" selected>2 retries</option>
+              <option value="3">3 retries</option>
+            </select>
+          </div>
+        </div>
+        <hr>
+        <div class="card-desc"><b>Audit issues</b> — posts that saved but whose audit found problems (red rows). Step&nbsp;1 re-reads the saved session's code box; Step&nbsp;2 re-runs the AI to rewrite the post. Solved posts drop out of the Audit Issues box.</div>
+        <div class="grid">
+          <div>
+            <label>Step 1 · Try the saved AI session</label>
+            <select id="htmlRecoveryAudit">
+              <option value="off" selected>Off — skip this step</option>
+              <option value="on">On — re-read the existing code</option>
+            </select>
+          </div>
+          <div>
+            <label>Step 2 · If it still fails, re-run the AI</label>
+            <select id="auditRetryEnabled">
+              <option value="off" selected>Off — just report the audit issue</option>
+              <option value="on">On — re-run the AI to rewrite the post</option>
+            </select>
+          </div>
+          <div>
+            <label>Re-run attempts</label>
+            <select id="auditRetryCount">
+              <option value="1" selected>1 attempt</option>
+              <option value="2">2 attempts</option>
+              <option value="3">3 attempts</option>
+            </select>
+          </div>
+          <div>
+            <label>When to re-run</label>
+            <select id="auditRetryTiming">
+              <option value="end" selected>After all posts finish</option>
+              <option value="immediate">Right after each audit issue</option>
+            </select>
+          </div>
+        </div>
+        <hr>
+        <div class="grid">
+          <div class="full">
+            <label>Fallback AI if the main one fails (optional)</label>
+            <select id="fallbackAI">
+              <option value="">None</option>
+            </select>
+            <small style="display:block;margin-top:6px;">If the main AI truncates, returns no code block, or fails a post, that post is retried once with this AI.</small>
+          </div>
+        </div>
+      </div>
+    </details>
+
+    <div class="settings-note">
+      <span>💾</span>
+      <span><b>Everything saves automatically.</b> Options save the moment you change them, and <b>Start Batch / Test First Post</b> pick up exactly what is on screen. Use <b>🧪 Test First Post</b> to verify your site, AI and prompt on one post before running the full batch.</span>
+    </div>
+
+    <!-- Progress -->
+    <div class="card" id="sec-logs">
+      <div class="card-title">Progress <span class="right" id="batchStatusLabel">Idle</span></div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill" style="width:0%"></div>
+        <div class="progress-text" id="progressText">0 / 0</div>
+      </div>
+      <div class="status-line" id="statusLine">Ready to start.</div>
+      <div class="log" id="logBox">
+        <div class="empty">Log entries will appear here when the batch starts.</div>
+      </div>
+    </div>
+
+    <details class="group box-success" id="sec-success" open>
+      <summary>✅ Successful posts
+        <span class="hint">updated on WordPress AND passed every audit check</span><span class="count-chip c-success" id="successCount"></span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;">Posts that updated successfully with a clean audit. Rows stay collapsed — click one to expand its links, message and actions. The CSV export includes every result (successful, audit issues and failed).</div>
+        <div class="row">
+          <button id="downloadProcessedBtn" class="btn-primary nogrow">⬇ Download Excel CSV (all results)</button>
+          <button id="clearProcessedBtn" class="btn-danger nogrow">Clear All Results</button>
+        </div>
+        <div class="processed-list" id="processedList">
+          <div class="empty">No successful posts yet.</div>
+        </div>
+      </div>
+    </details>
+
+    <details class="group box-audit" id="sec-audit" open>
+      <summary>🟠 Audit issues
+        <span class="hint">updated on WordPress but the audit found problems — worst first</span><span class="count-chip c-audit" id="auditCount"></span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;">Sorted automatically: <b>missing FAQ + Conclusion</b> first, then missing FAQ, then missing Conclusion, then the most audit issues down to the fewest. Click a row to expand it. Tick posts and re-run them together — each post is re-sent to the AI <b>with its own audit issues attached</b> so it fixes exactly what is wrong.</div>
+        <div class="row" style="align-items:center;">
+          <button id="auditSelectAllBtn" class="nogrow">☑ Select All</button>
+          <button id="auditClearSelBtn" class="nogrow">☐ Clear</button>
+          <small id="auditSelCount" style="flex:none;">none selected</small>
+          <button id="runSelectedAuditBtn" class="btn-primary nogrow" disabled>▶ Run Selected Posts in New AI Session</button>
+        </div>
+        <div class="row" style="align-items:center;margin-top:8px;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">FAQ-Conclusion Missing AI Session
+            <select id="faqConclAuto" style="width:auto;">
+              <option value="off">Off — manual only</option>
+              <option value="on">On — auto-run after each batch</option>
+            </select>
+          </label>
+        </div>
+        <div class="card-desc" style="margin-top:6px;">When <b>On</b>: after a full batch finishes, every post whose audit says the FAQ or Conclusion is missing is automatically re-run in a new AI session (with those issues attached). When <b>Off</b>: nothing starts by itself — tick posts and use the buttons above, or use the <b>All FAQ/Conclusion-missing</b> buttons in the <b>Retry Center → Retry All At Once</b> section below.</div>
+        <div class="row">
+          <button id="downloadAuditIssuesBtn" class="btn-primary nogrow">⬇ Download Excel CSV</button>
+        </div>
+        <div class="processed-list" id="auditIssuesList">
+          <div class="empty">No audit issues yet.</div>
+        </div>
+      </div>
+    </details>
+
+    <!-- 📝 FAQ / Conclusion missing sub-box (a focused view of the audit issues) -->
+    <details class="group box-audit" id="sec-faq" open>
+      <summary>📝 FAQ / Conclusion missing
+        <span class="hint">audit-issue posts specifically missing the FAQ and/or Conclusion</span><span class="count-chip c-audit" id="faqCount"></span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;">A focused list of the Audit Issues above, showing only posts whose audit says the <b>FAQ</b> and/or <b>Conclusion</b> is missing. Re-run them all at once (one by one): <b>AI session</b> re-reads each saved chat, <b>Recover any code</b> accepts partial HTML, <b>New session</b> re-runs each post with the missing-section note attached so the AI adds it back.</div>
+        <div class="row">
+          <button id="faqBoxAiBtn" class="btn-primary nogrow">↻ AI session (all)</button>
+          <button id="faqBoxAnyBtn" class="btn-warn nogrow">↻ Recover any code (all)</button>
+          <button id="faqBoxNewBtn" class="btn-warn nogrow">↻ New session — fix missing (all)</button>
+          <button id="faqBoxFreshBtn" class="btn-danger nogrow">🗄 Original HTML Fresh Recovery (all)</button>
+        </div>
+        <div class="processed-list" id="faqConclList">
+          <div class="empty">No FAQ/Conclusion-missing posts.</div>
+        </div>
+      </div>
+    </details>
+
+    <details class="group box-failed" id="sec-failed" open>
+      <summary>❌ Failed posts
+        <span class="hint">NOT updated on WordPress — need attention</span><span class="count-chip c-failed" id="failedCount"></span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;">Posts that failed completely and were <b>not</b> updated on WordPress. Click a row to expand its links, the exact error, and per-post retry options — or use the bulk retry buttons in the Retry report section below.</div>
+        <div class="processed-list" id="failedList">
+          <div class="empty">No failed posts.</div>
+        </div>
+      </div>
+    </details>
+
+    <details class="group" id="sec-retry" open>
+      <summary>↻ Retry Center
+        <span class="hint">every unresolved failure &amp; audit issue in one place</span><span class="count-chip" id="retryCenterCount"></span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-title" style="margin-top:12px;">Retry Report</div>
+        <div class="card-desc">Summary of audit-issue retries and failed-post retries for this batch — totals, how many were solved, how many remain.</div>
+        <div id="retryReport">
+          <div class="empty">No audit issues or failed posts yet.</div>
+        </div>
+        <hr>
+        <div class="card-title">Failed Posts</div>
+        <div class="row" style="margin-bottom:8px;">
+          <button id="retryFailedBtn" class="btn-warn nogrow">↻ Reload Failed Posts into the slug box</button>
+          <small>Loads the failed slugs back into the textarea so you can press Start again.</small>
+        </div>
+        <div id="failureList">
+          <div class="empty">No failed posts in this batch.</div>
+        </div>
+        <hr>
+        <div class="card-title">🤖 Auto-retry (runs by itself)</div>
+        <div class="card-desc">Set this once and matching posts are retried <b>automatically</b> during the batch — no button clicks. Leave <b>When</b> on <b>Off</b> to only use the manual buttons below.</div>
+        <div class="row" style="align-items:center;">
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">When
+            <select id="autoRetryWhen" style="width:auto;">
+              <option value="off">Off — I'll click the buttons myself</option>
+              <option value="each">After each article</option>
+              <option value="end">After the whole batch finishes</option>
+            </select>
+          </label>
+          <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">Method
+            <select id="autoRetryMethod" style="width:auto;">
+              <option value="new">New AI session (fixes what's missing)</option>
+              <option value="session">Re-read the saved AI session</option>
+              <option value="anycode">Recover any code (accept partial HTML)</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="align-items:center;margin-top:6px;">
+          <span style="font-size:12px;color:var(--text-dim);">Auto-retry:</span>
+          <label class="nogrow" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer;"><input type="checkbox" id="autoRetryFailed" style="width:auto;margin:0;"> Failed posts</label>
+          <label class="nogrow" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer;"><input type="checkbox" id="autoRetryAudit" style="width:auto;margin:0;"> Audit issues</label>
+          <label class="nogrow" style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text);cursor:pointer;"><input type="checkbox" id="autoRetryFaq" style="width:auto;margin:0;"> FAQ/Conclusion missing</label>
+        </div>
+        <div class="status-line" id="autoRetrySummary" style="margin-top:8px;"></div>
+        <hr>
+        <div class="card-title">Retry All At Once (one by one)</div>
+        <div class="card-desc"><b>AI session</b> re-reads each saved session with the normal completeness checks. <b>Recover any code</b> accepts shorter/partial HTML from each saved session. <b>New session</b> re-runs the AI from scratch — for Audit and FAQ/Conclusion rows the exact audit issues are attached to the prompt so the AI fixes what is missing.</div>
+        <div class="row">
+          <button id="retryAllFailedSessionBtn" class="btn-primary nogrow">↻ All Failed — AI session</button>
+          <button id="retryAllFailedAnyCodeBtn" class="btn-warn nogrow">↻ All Failed — Recover any code</button>
+          <button id="retryAllFailedNewBtn" class="btn-warn nogrow">↻ All Failed — new session</button>
+          <button id="retryAllFailedSectionsBtn" class="btn-primary nogrow">↻ All Failed — Intro/FAQ/Conclusion recover</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="retryAllAuditSessionBtn" class="btn-primary nogrow">↻ All Audit — AI session</button>
+          <button id="retryAllAuditAnyCodeBtn" class="btn-warn nogrow">↻ All Audit — Recover any code</button>
+          <button id="retryAllAuditNewBtn" class="btn-warn nogrow">↻ All Audit — new session</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="retryAllFaqSessionBtn" class="btn-primary nogrow">↻ All FAQ/Conclusion-missing — AI session</button>
+          <button id="retryAllFaqAnyCodeBtn" class="btn-warn nogrow">↻ All FAQ/Conclusion-missing — Recover any code</button>
+          <button id="retryAllFaqNewBtn" class="btn-warn nogrow">↻ All FAQ/Conclusion-missing — new session</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button id="retryAllFaqFreshBtn" class="btn-danger nogrow">🗄 All FAQ/Conclusion-missing — Original HTML Fresh Recovery</button>
+          <small style="flex:1;min-width:220px;color:var(--text-faint);"><b>Rebuilds from the original article.</b> Ignores what is on WordPress now <i>and</i> the last AI reply, loads each post's <b>pre-update Original HTML backup</b>, and re-runs the prompt in a brand-new AI session with the exact audit problem attached. Use it when an edit dropped the FAQ/Conclusion — patching the damaged article often can't bring it back, rebuilding from the original can. If a post has no saved backup it is skipped with a clear error (never falls back to the live article). Backups are never modified.</small>
+        </div>
+      </div>
+    </details>
+
+    <details class="group" id="sec-backups">
+      <summary>🗄 Original HTML backups
+        <span class="hint">automatic pre-update copies</span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;">Before each post is updated its original HTML is saved automatically. <b>This Session</b> = just the last task's articles (with article + AI session links). <b>All Originals</b> = every saved original. Use them to restore a post if an edit goes wrong.</div>
+        <div class="row">
+          <button id="downloadSessionBtn" class="btn-primary nogrow">⬇ Download This Session (ZIP)</button>
+          <button id="downloadOriginalsBtn" class="btn-primary nogrow">⬇ Download All Originals (ZIP)</button>
+          <button id="clearOriginalsBtn" class="btn-danger nogrow">Clear Original HTML Backups</button>
+        </div>
+        <small id="originalsCount" style="display:block;margin-top:8px;">No originals saved yet.</small>
+      </div>
+    </details>
+
+  </div>
+
+  <!-- ═══════════════════ SETTINGS TAB ═══════════════════ -->
+  <div class="tab-content" id="tab-settings">
+
+    <div class="card">
+      <div class="card-title">🌐 WordPress Sites<span class="count-chip" id="wpCount"></span></div>
+      <div class="card-desc">Add your WordPress sites. Direct REST API mode uses a username + Application Password and updates posts without opening the editor tab.</div>
+      <div class="grid">
+        <input type="text" id="wpName" placeholder="Site name (e.g. My Blog)">
+        <input type="text" id="wpUrl" placeholder="https://mysite.com">
+      </div>
+      <div class="grid" style="margin-top:10px;">
+        <select id="wpUpdateMode">
+          <option value="rest" selected>Direct REST API (no editor tab)</option>
+          <option value="editor">Browser editor tab (old mode)</option>
+        </select>
+        <select id="wpCredentialMode">
+          <option value="auto" selected>Auto connect WordPress</option>
+          <option value="manual">Manual username + app password</option>
+        </select>
+      </div>
+      <div class="grid" id="wpManualFields" style="margin-top:10px;">
+        <input type="text" id="wpUser" placeholder="WordPress username">
+        <input type="password" id="wpAppPassword" placeholder="Application Password">
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="wpAutoConnect" class="btn-primary nogrow">⚡ Auto Connect WordPress</button>
+        <button id="wpAdd" class="nogrow">+ Add Manually</button>
+        <button id="wpNew" class="nogrow">New Site</button>
+      </div>
+      <small style="display:block;margin-top:8px;">Auto connect opens WordPress so you can approve an Application Password. Credentials are stored in this extension's local storage on this computer.</small>
+      <div id="wpList" style="margin-top:14px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🤖 AI Services<span class="count-chip" id="aiServiceCount"></span></div>
+      <div class="card-desc">Built-in web AIs (Grok, ChatGPT, Claude, Gemini), your own custom web AI tabs, or direct API connections (no browser tab — best for very large articles).</div>
+      <div class="grid">
+        <input type="text" id="aiName" placeholder="AI name (e.g. DeepSeek)">
+        <select id="aiMode">
+          <option value="web" selected>Web UI tab</option>
+          <option value="openai">OpenAI-compatible API</option>
+          <option value="gemini">Gemini API</option>
+          <option value="anthropic">Claude API</option>
+        </select>
+      </div>
+      <div class="grid" style="margin-top:10px;">
+        <input type="text" id="aiUrl" placeholder="https://chat.deepseek.com">
+        <input type="text" id="aiModel" placeholder="Model (API only)" style="display:none;">
+        <input type="password" id="aiApiKey" placeholder="API key (API only)" style="display:none;">
+      </div>
+      <div class="row" style="margin-top:12px;">
+        <button id="aiAdd" class="btn-primary nogrow">+ Add</button>
+        <button id="aiNew" class="nogrow">New AI</button>
+      </div>
+      <div id="aiList" style="margin-top:14px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📝 Prompts<span class="count-chip" id="promptCount"></span></div>
+      <div class="card-desc">Define the AI prompts. The article HTML is automatically appended to the prompt when sent to the AI.</div>
+      <div class="grid">
+        <div>
+          <label>Prompt name</label>
+          <input type="text" id="promptName" placeholder="e.g. Info Article Editing">
+        </div>
+        <div>
+          <label>Prompt type</label>
+          <select id="promptType">
+            <option value="audit" selected>Audit + Fix — show audit report after saving</option>
+            <option value="edit">Edit only — just edit and save, no audit report</option>
+          </select>
+        </div>
+      </div>
+      <label style="margin-top:10px;">Prompt text</label>
+      <textarea id="promptText" style="min-height:130px;" placeholder="Your full prompt here..."></textarea>
+      <div class="row" style="margin-top:12px;">
+        <button id="promptAdd" class="btn-primary nogrow">+ Add Prompt</button>
+        <button id="promptNew" class="nogrow">New Prompt</button>
+      </div>
+      <hr>
+      <div id="promptList"></div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════ BACKUP TAB ═══════════════════ -->
+  <div class="tab-content" id="tab-backup">
+    <div class="card">
+      <div class="card-title">💾 Backup &amp; Restore</div>
+      <div class="card-desc">Export everything (sites, AIs, prompts, settings) to a JSON file. Compatible with Manual Extensions backups — you can transfer settings between them.</div>
+      <div class="row">
+        <button id="exportBtn" class="btn-primary nogrow">⬇ Export Backup</button>
+        <button id="importBtn" class="nogrow">⬆ Import Backup</button>
+        <input type="file" id="importFile" accept=".json" style="display:none;">
+      </div>
+      <div id="backupMsg" style="margin-top:12px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🧹 Maintenance</div>
+      <div class="card-desc"><b>Reset Settings to Default</b> — reset only timing &amp; run options; your sites, AIs and prompts are kept. <b>Clear Backups (remove EVERYTHING)</b> — permanently delete <b>all</b> data: every site, AI, prompt, credential, original-HTML backup, all history and settings. Built-in AIs stay. Export a backup first if you might want any of it back.</div>
+      <div class="row">
+        <button id="resetSettingsBtn" class="btn-warn nogrow">Reset Settings to Default</button>
+        <button id="clearBackupBtn" class="btn-danger nogrow">🗑 Clear Backups (remove EVERYTHING)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Sticky action bar — always reachable -->
+<div class="action-bar">
+  <div class="action-bar-inner">
+    <div id="msg"></div>
+    <button id="saveAllSettingsBtn" class="btn-primary nogrow" title="Saves every option and the pasted slug list. (Everything also saves automatically — this button is optional.)">💾 Save All Settings</button>
+    <span class="batch-pill" id="batchPill">Ready</span>
+    <div class="spacer"></div>
+    <button id="applyLiveBtn" class="nogrow" title="Apply the current options to the running batch from the next post onward.">↻ Apply to Next Post</button>
+    <button id="testFirstBtn" class="btn-warn nogrow" title="Runs ONLY the first slug in the list so you can verify the site, AI and prompt before the full batch.">🧪 Test First Post</button>
+    <button id="startBtn" class="btn-primary nogrow">▶ Start Batch</button>
+    <button id="pauseBtn" class="btn-warn nogrow" disabled>⏸ Pause</button>
+    <button id="resumeBtn" class="btn-primary nogrow" disabled style="display:none;">▶ Resume</button>
+    <button id="stopBtn" class="btn-danger nogrow" disabled>⏹ Stop</button>
+  </div>
+</div>
+
+<script src="panel.js"></script>
+</body>
+</html>
