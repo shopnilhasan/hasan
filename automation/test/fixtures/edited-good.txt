@@ -1,0 +1,186 @@
+<<<ARTICLE_HTML>>>
+<!-- wp:paragraph -->
+<p>Knowing how to check tyre pressure at home saves fuel, protects your tyres and keeps your car safer to drive. The whole job takes about five minutes, and the only tool you really need is a gauge. This guide shows you where to find the right number, how to take an accurate reading and how often to do it.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:html -->
+<div style="background:#eef3fe;border-left:5px solid #2962ff;border-radius:6px;padding:16px 20px;margin:24px 0;color:#1f2937;"><p style="font-weight:700;font-size:1.05em;margin:0 0 8px;">Quick Answer</p><p style="margin:0;line-height:1.6;">Check your tyres when they are cold, before you drive. Find the car maker's pressure on the driver door sticker or in the handbook, press a gauge onto each valve, then add or release air until every tyre, including the spare, matches that number. Repeat once a month and before long trips.</p></div>
+<!-- /wp:html -->
+
+<!-- wp:rank-math/toc-block {"headings":[{"key":"why-tyre-pressure-matters","content":"Why Tyre Pressure Matters","level":2,"link":"#why-tyre-pressure-matters","disable":false},{"key":"what-you-need","content":"What You Need","level":2,"link":"#what-you-need","disable":false},{"key":"step-by-step","content":"Step by Step","level":2,"link":"#step-by-step","disable":false}],"listStyle":"ul"} -->
+<div class="wp-block-rank-math-toc-block" id="rank-math-toc"><h2>Table of Contents</h2><nav><ul><li><a href="#why-tyre-pressure-matters">Why Tyre Pressure Matters</a></li><li><a href="#what-you-need">What You Need</a></li><li><a href="#step-by-step">Step by Step</a></li></ul></nav></div>
+<!-- /wp:rank-math/toc-block -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading" id="why-tyre-pressure-matters">Why Does Tyre Pressure Matter?</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>Correct tyre pressure helps your car brake, steer and grip the road the way its maker intended. It also cuts fuel use and makes your tyres last longer. Both too little and too much air cause problems.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>With too little air, the tyre flexes more, runs hotter and wears out on its outer edges. With too much air, the centre of the tread wears faster, and the car can feel bouncy and less stable on wet roads.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>Low pressure is also a safety risk. A badly under-inflated tyre can overheat on a long motorway drive and, in the worst case, fail. The <a href="https://www.nhtsa.gov/equipment/tires" target="_blank" rel="noopener">NHTSA guide to tyre safety</a> explains why a monthly pressure check is a smart habit for every driver.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:image {"id":101,"sizeSlug":"large","linkDestination":"none"} -->
+<figure class="wp-block-image size-large"><img decoding="async" loading="lazy" width="1024" height="683" src="https://tubetyre.com/wp-content/uploads/2024/05/tyre-pressure-gauge-1024x683.jpg" alt="Digital tyre pressure gauge pressed onto a car tyre valve" class="wp-image-101" srcset="https://tubetyre.com/wp-content/uploads/2024/05/tyre-pressure-gauge-1024x683.jpg 1024w, https://tubetyre.com/wp-content/uploads/2024/05/tyre-pressure-gauge-300x200.jpg 300w, https://tubetyre.com/wp-content/uploads/2024/05/tyre-pressure-gauge-768x512.jpg 768w" sizes="(max-width: 1024px) 100vw, 1024px" /><figcaption class="wp-element-caption">A digital gauge gives a clear, easy-to-read number</figcaption></figure>
+<!-- /wp:image -->
+
+<!-- wp:more -->
+<!--more-->
+<!-- /wp:more -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading" id="what-you-need">What Do You Need to Check Tyre Pressure?</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>You don't need special tools. Most drivers already have what they need at home, and the rest is cheap at any petrol station or car parts shop.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:list -->
+<ul class="wp-block-list"><!-- wp:list-item -->
+<li>A tyre pressure gauge (digital or dial type)</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li>An air compressor, or access to the air pump at a petrol station</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li>Your car's recommended pressure, printed on the door sticker or in the handbook</li>
+<!-- /wp:list-item --></ul>
+<!-- /wp:list -->
+
+<!-- wp:image {"id":102,"sizeSlug":"large","linkDestination":"media"} -->
+<figure class="wp-block-image size-large"><a href="https://tubetyre.com/wp-content/uploads/2024/05/door-sticker.jpg"><img decoding="async" loading="lazy" width="800" height="600" src="https://tubetyre.com/wp-content/uploads/2024/05/door-sticker-800x600.jpg" alt="Tyre pressure sticker inside the driver door frame of a car" class="wp-image-102" srcset="https://tubetyre.com/wp-content/uploads/2024/05/door-sticker-800x600.jpg 800w, https://tubetyre.com/wp-content/uploads/2024/05/door-sticker-300x225.jpg 300w" sizes="(max-width: 800px) 100vw, 800px" /></a></figure>
+<!-- /wp:image -->
+
+<!-- wp:html -->
+<ins class="adsbygoogle" style="display:block; text-align:center;" data-ad-layout="in-article" data-ad-format="fluid" data-ad-client="ca-pub-0000000000000000" data-ad-slot="1234567890"></ins>
+<script>
+     (adsbygoogle = window.adsbygoogle || []).push({});
+</script>
+<!-- /wp:html -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading" id="step-by-step">How to Check Tyre Pressure Step by Step</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>Check your tyres in the morning, before you drive. Driving warms the tyres, and warm air gives a higher reading, so a cold check is the accurate one. If you have already driven, wait at least three hours first.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:list {"ordered":true} -->
+<ol class="wp-block-list"><!-- wp:list-item -->
+<li>Find the recommended pressure on the sticker inside the driver door or in your handbook.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li>Unscrew the cap from the valve on the first tyre and put it somewhere safe.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li>Press the gauge firmly onto the valve until the hissing stops, then read the number.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li>If the reading is low, add air. If it is high, press the small pin in the centre of the valve to let some air out.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li>Measure again, screw the cap back on, and repeat for the other tyres and the spare.</li>
+<!-- /wp:list-item --></ol>
+<!-- /wp:list -->
+
+<!-- wp:paragraph -->
+<p>Don't forget the spare wheel. A flat spare is no help when you get a puncture at the side of the road, so check it every time you check the others.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:html -->
+<div style="background:#eafaf1;border-left:5px solid #2e9e5b;border-radius:6px;padding:14px 18px;margin:24px 0;color:#1f2937;"><p style="margin:0;line-height:1.6;"><strong>Pro Tip:</strong> Keep a small gauge in the glovebox. Then you can do a quick cold check at home or right after you arrive at a petrol station, without guessing.</p></div>
+<!-- /wp:html -->
+
+<!-- wp:shortcode -->
+[gallery ids="201,202,203" columns="3" size="medium"]
+<!-- /wp:shortcode -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading">Where Do You Find the Right Tyre Pressure?</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>The right pressure for your car comes from the car maker, not the tyre maker. Look for a sticker in the driver door frame or inside the fuel filler flap, or check the owner's handbook.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>The number moulded into the tyre sidewall is different. It is the maximum pressure the tyre can safely hold, not the pressure to use every day. Our guide on <a href="https://tubetyre.com/tyre-sidewall-markings/">reading tyre sidewall markings</a> explains what each code on the side of the tyre means.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>Some cars list two sets of numbers: one for normal driving and one for a full load. When you carry heavy luggage, a roof box or a car full of passengers, use the higher numbers for that trip. Go back to the normal numbers afterwards.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>Check your tyre pressure at least once a month and before every long trip. Tyres slowly lose air even when nothing is wrong with them. The UK tyre safety charity <a href="https://www.tyresafe.org/" target="_blank" rel="noopener">TyreSafe</a> also recommends a monthly check.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>Temperature changes the pressure too. Cold air holds less pressure, so check more often when the weather turns cold in autumn and winter.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:paragraph -->
+<p>If one tyre keeps losing air faster than the others, it may have a slow puncture or a leaking valve. Ask a tyre shop to inspect it soon, because a slow leak can turn into a flat tyre at the worst possible moment.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:rank-math/rich-snippet {"id":"s-1a2b3c4d"} /-->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading">What Are the Most Common Mistakes?</h2>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph -->
+<p>These mistakes cause most wrong readings. Each one is easy to avoid once you know about it.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:list -->
+<ul class="wp-block-list"><!-- wp:list-item -->
+<li><strong>Checking hot tyres.</strong> A reading taken after a long drive is too high, so you may let out air the tyre actually needs.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li><strong>Using the sidewall number.</strong> That is the tyre's maximum, not the car maker's recommended pressure.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li><strong>Trusting your eyes.</strong> A tyre can be quite low on air and still look normal, especially a modern low-profile tyre.</li>
+<!-- /wp:list-item -->
+
+<!-- wp:list-item -->
+<li><strong>Relying on a cheap pencil gauge.</strong> These can be a few units out. If your readings seem strange, compare your gauge with the one at a petrol station or buy a better digital gauge, which costs little and lasts for years.</li>
+<!-- /wp:list-item --></ul>
+<!-- /wp:list -->
+
+<!-- wp:paragraph -->
+<p>Your next step is simple: find the pressure sticker on your car today and do your first cold check tomorrow morning.</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:heading -->
+<h2 class="wp-block-heading">Sources</h2>
+<!-- /wp:heading -->
+
+<!-- wp:html -->
+<ol style="line-height:1.8;padding-left:20px;"><li><a href="https://www.nhtsa.gov/equipment/tires" target="_blank" rel="noopener">NHTSA: Tires</a>: why regular pressure checks matter for safety</li><li><a href="https://www.tyresafe.org/" target="_blank" rel="noopener">TyreSafe</a>: monthly tyre pressure check advice</li></ol>
+<!-- /wp:html -->
+<<<META_JSON>>>
+{"status": "edited", "skip_reason": "", "language": "en", "editor": "block", "intent": "how-to", "focus_keyword": "check tyre pressure", "secondary_keywords": ["tyre pressure gauge", "recommended tyre pressure", "cold tyres", "door sticker"], "seo_titles": ["How to Check Tyre Pressure at Home in 5 Minutes", "Check Tyre Pressure at Home: Easy Step-by-Step Guide"], "meta_description": "Learn how to check tyre pressure at home in five minutes: where to find the right number, how to use a gauge and how often to check. Start today.", "web_research_used": true, "external_links_added": [{"url": "https://www.tyresafe.org/", "anchor": "TyreSafe", "supports": "monthly tyre pressure check recommendation"}], "facts_changed": [], "unverified_kept": ["pencil gauges can be a few units out"], "notes": ["The Rank Math TOC block still uses the old heading texts; update its headings in the block settings if wanted."]}
+<<<END>>>

@@ -1649,12 +1649,13 @@ function filterAuditIssues(editedHtml, audit, extra) {
 
 async function processEditorOutput(originalHtml, llmText, options) {
   const original = toStr(originalHtml);
-  const opts = normalizeOptions(options);
+  let opts = null;
   const out = {
     action: 'keep_original', html: original, meta: null, errors: [], warnings: [],
     removedLinks: [], linkResults: [], stats: null, changed: false
   };
   try {
+    opts = normalizeOptions(options);
     const parsed = parseEditorOutput(llmText);
     out.meta = parsed.meta;
     if (parsed.ok && parsed.status === 'skipped') {

@@ -1,0 +1,48 @@
+Here is the edited article.
+<<<ARTICLE_HTML>>>
+<p>Painting a room is one of the cheapest ways to change how your home looks and feels. The cost to paint a room depends on its size, the paint you choose and whether you do it yourself or hire a painter. This guide shows typical prices and what pushes them up or down.</p>
+<div style="background:#eef3fe;border-left:5px solid #2962ff;border-radius:6px;padding:16px 20px;margin:24px 0;color:#1f2937;"><p style="font-weight:700;font-size:1.05em;margin:0 0 8px;">Quick Answer</p><p style="margin:0;line-height:1.6;">For a standard 12 by 12 foot bedroom in the US, a professional painter usually charges $300 to $800 for the walls. Doing it yourself costs around $100 to $250 for paint and supplies. Large rooms, high ceilings and lots of trim raise the price.</p></div>
+
+[caption id="attachment_55" align="aligncenter" width="800"]<img class="size-large wp-image-55" src="https://getcostidea.com/wp-content/uploads/2023/03/painted-living-room-800x533.jpg" alt="Living room with freshly painted light walls" width="800" height="533" /> A living room after a fresh coat of paint[/caption]
+
+<h2>How Much Does It Cost to Paint a Room?</h2>
+<p>Most US homeowners pay between $300 and $800 to have a professional paint the walls of a normal 12 by 12 foot bedroom. If you paint it yourself, expect to spend around $100 to $250 on paint and supplies. Bigger rooms, high ceilings and lots of trim push the price up.</p>
+<p>Some painters charge by the square foot of wall area, while others quote a fixed price per room. Always ask what the quote includes, such as moving furniture, filling small holes, painting the ceiling and cleaning up afterwards.</p>
+
+<h2>What Affects the Cost of Painting a Room?</h2>
+<p>Five things change the final price of a paint job the most:</p>
+<ul>
+<li><strong>Room size and ceiling height:</strong> more wall area needs more paint and more hours.</li>
+<li><strong>Number of coats:</strong> going from a dark colour to a light one often needs an extra coat.</li>
+<li><strong>Paint quality:</strong> premium paint costs more per gallon but often covers better.</li>
+<li><strong>Preparation:</strong> filling cracks, sanding and priming all add time.</li>
+<li><strong>Extra surfaces:</strong> doors, window frames, skirting boards and the ceiling cost extra.</li>
+</ul>
+<p>Older homes can need extra care. If your house was built before 1978, the old paint may contain lead, and sanding it can be dangerous. The <a href="https://www.epa.gov/lead">EPA's lead information page</a> explains the rules and how to handle it safely.</p>
+<div style="background:#fdeced;border-left:5px solid #e53935;border-radius:6px;padding:14px 18px;margin:24px 0;color:#1f2937;"><p style="margin:0;line-height:1.6;"><strong>Warning:</strong> Never dry-sand old paint in a home built before 1978 until you know it is lead-free. Lead dust is a serious health risk, especially for children.</p></div>
+
+<h2>Should You Paint It Yourself or Hire a Painter?</h2>
+<p>Painting a room yourself is cheaper, but it takes time and some skill to get clean lines and an even finish. A professional works faster, brings the right tools and usually gives a better result, especially on ceilings and trim.</p>
+<p>On a tight budget, a good middle way is to do the preparation yourself and hire a painter only for the final coats. You can compare this with other projects in our guide to <a href="https://getcostidea.com/interior-painting-cost/">interior painting costs</a>.</p>
+
+<h2>How Can You Save Money on Painting a Room?</h2>
+<p>A few simple steps keep the cost down:</p>
+<ol>
+<li>Get at least three quotes from local painters and compare exactly what each one includes.</li>
+<li>Buy good paint, because cheap paint often needs an extra coat.</li>
+<li>Book the job in quieter months, when some painters offer lower prices.</li>
+<li>Move the furniture and clear the room yourself so the painter can start straight away.</li>
+</ol>
+<p>Before you buy, read the coverage figure printed on the can so you get enough paint for every coat in one trip. For background on paint types, see the <a href="https://www.paint.org/" target="_blank" rel="noopener">American Coatings Association</a>, the trade group of the US paint industry.</p>
+
+<h2>Frequently Asked Questions</h2>
+<details style="background:#f7f9fc;border:1px solid #e3e8ef;border-radius:10px;padding:14px 18px;margin:12px 0;color:#1f2937;"><summary style="font-weight:700;font-size:1.02em;color:#1a2b4a;cursor:pointer;">How long does it take to paint a room?</summary><p style="margin:10px 0 0;line-height:1.7;">Most average bedrooms take one person one to two days, including drying time between coats. A professional team can often finish a room in a single day.</p></details>
+<details style="background:#f7f9fc;border:1px solid #e3e8ef;border-radius:10px;padding:14px 18px;margin:12px 0;color:#1f2937;"><summary style="font-weight:700;font-size:1.02em;color:#1a2b4a;cursor:pointer;">Do I need to use primer?</summary><p style="margin:10px 0 0;line-height:1.7;">Use primer on bare plaster, new drywall, stains or a much darker colour. On painted walls in good condition, a paint with built-in primer is often enough.</p></details>
+<details style="background:#f7f9fc;border:1px solid #e3e8ef;border-radius:10px;padding:14px 18px;margin:12px 0;color:#1f2937;"><summary style="font-weight:700;font-size:1.02em;color:#1a2b4a;cursor:pointer;">Is it cheaper to paint a room yourself?</summary><p style="margin:10px 0 0;line-height:1.7;">Yes. Doing it yourself is usually much cheaper because you only pay for paint and supplies. Remember to count the value of your own time and the cost of any tools you need to buy.</p></details>
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How long does it take to paint a room?","acceptedAnswer":{"@type":"Answer","text":"Most average bedrooms take one person one to two days, including drying time between coats. A professional team can often finish a room in a single day."}},{"@type":"Question","name":"Do I need to use primer?","acceptedAnswer":{"@type":"Answer","text":"Use primer on bare plaster, new drywall, stains or a much darker colour. On painted walls in good condition, a paint with built-in primer is often enough."}},{"@type":"Question","name":"Is it cheaper to paint a room yourself?","acceptedAnswer":{"@type":"Answer","text":"Yes. Doing it yourself is usually much cheaper because you only pay for paint and supplies. Remember to count the value of your own time and the cost of any tools you need to buy."}}]}</script>
+<<<META_JSON>>>
+```json
+{"status": "edited", "skip_reason": "", "language": "en", "editor": "classic", "intent": "cost", "focus_keyword": "cost to paint a room", "secondary_keywords": ["painter cost", "paint a bedroom", "DIY painting"], "seo_titles": ["Cost to Paint a Room: Pro vs DIY Prices Explained", "How Much Does It Cost to Paint a Room?"], "meta_description": "See the typical cost to paint a room, what drives the price up or down, and when doing it yourself saves money. Compare your options before you book.", "web_research_used": false, "external_links_added": [{"url": "https://www.paint.org/", "anchor": "American Coatings Association", "supports": "paint coverage information"}], "facts_changed": [], "unverified_kept": ["$300 to $800 professional price range", "$100 to $250 DIY cost"], "notes": ["No web search was available; only an official homepage was linked."]}
+```
+<<<END>>>
+trailing text the parser must ignore
