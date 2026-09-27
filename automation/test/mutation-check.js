@@ -41,7 +41,16 @@ const MUTANTS = [
   ['classic block comments allowed', 'if (!O.tokens.length && E.tokens.length) {', 'if (false) {'],
   ['unclosed script allowed', 'if (E.nonJsonLdScriptOpeners > O.nonJsonLdScriptOpeners) {', 'if (false) {'],
   ['site domain never required', 'if (!opts.siteDomains.length) {\n      out.errors', 'if (false) {\n      out.errors'],
-  ['stale CLI output kept', 'try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {', 'try { void f; } catch (e) {']
+  ['stale CLI output kept', 'try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {', 'try { void f; } catch (e) {'],
+  ['TABLE_LOSS off', 'if (tablesE < tablesO || rowsE < rowsO) {', 'if (false) {'],
+  ['LIST_LOSS off', 'if (itemsO && itemsE < itemsO * 0.7) {', 'if (false) {'],
+  ['end marker not required (validateArticle)', 'if (opts.requireEndMarker && !hasEndMarker(editedN, endMarker)) {', 'if (false) {'],
+  ['end marker not required (runSafetyGate)', 'if (opts.requireEndMarker && !markerFound) {', 'if (false) {'],
+  ['end markers not stripped', "if (html.indexOf('<!--') < 0) return html;\n  const src = endMarkerSrc(marker);", 'return html;\n  const src = endMarkerSrc(marker);'],
+  ['webSearchAllowed ignored', 'if (o.webSearchAllowed === false ||', 'if (false && o.webSearchAllowed === false ||'],
+  ['classic conversion on partial comments', 'const classicConversion = O.tokens.length > 0 && E.tokens.length === 0;', 'const classicConversion = O.tokens.length > 0;'],
+  ['gate ok despite errors', 'if (v.pass && !out.errors.length) {', 'if (true) {'],
+  ['gate ignores its own errors', 'if (v.pass && !out.errors.length) {', 'if (v.pass) {']
 ];
 
 function main() {

@@ -1414,6 +1414,282 @@ test('no false fails from the new text rules: normal sentences that look a bit l
 });
 
 // ---------------------------------------------------------------------------------------------
+// browser extension Safety Gate (v1.2.0): end marker, tables/lists, classic conversion,
+// webSearchAllowed, runSafetyGate, self.SafetyGate
+// ---------------------------------------------------------------------------------------------
+const GATE = { siteDomains: ['tubetyre.com'], endMarker: 'APU-END', requireEndMarker: true };
+const END = '<!-- APU-END -->';
+const TABLE_BLOCK = '<!-- wp:table -->\n<figure class="wp-block-table"><table><thead><tr><th>Tyre type</th><th>Typical pressure</th></tr></thead>' +
+  '<tbody><tr><td>Small car</td><td>30 to 32 psi</td></tr><tr><td>Family car</td><td>32 to 35 psi</td></tr></tbody></table></figure>\n<!-- /wp:table -->';
+const T_ORIG = insertBeforeSnippet(ORIG, TABLE_BLOCK);
+const T_GOOD = insertBeforeSnippet(GOOD, TABLE_BLOCK);
+const stripBlockComments = (h) => h.replace(/<!--\s*\/?wp:[\s\S]*?-->\n?/g, '');
+const withoutPluginBlocks = (h) => h.replace(/<!-- wp:rank-math\/toc-block[\s\S]*?<!-- \/wp:rank-math\/toc-block -->\n?/, '')
+  .replace(/<!-- wp:rank-math\/rich-snippet[^>]*\/-->\n?/, '');
+
+test('stripEndMarkers: every <!-- APU-END --> form is removed; own-line markers with their line, inline ones alone', () => {
+  assert.equal(V.stripEndMarkers('<p>a</p>\n<!-- APU-END -->\n'), '<p>a</p>\n');
+  assert.equal(V.stripEndMarkers('<p>a</p>\n  <!--apu-end-->  \r\n<p>b</p>'), '<p>a</p>\n<p>b</p>');
+  assert.equal(V.stripEndMarkers('<p>a</p>\n<!--   APU-END   -->'), '<p>a</p>\n');
+  assert.equal(V.stripEndMarkers('<p>a</p><!-- APU-END --><p>b</p>\n\n<p>c</p>'), '<p>a</p><p>b</p>\n\n<p>c</p>');
+  assert.equal(V.stripEndMarkers('<p>a</p>\n' + END + '\n<p>b</p>\n' + END), '<p>a</p>\n<p>b</p>\n');
+  assert.equal(V.stripEndMarkers('<p>a</p>\n<!-- END-X -->\n', 'END-X'), '<p>a</p>\n');
+  // not a marker: other comments, escaped text, a similar name
+  const keep = '<p>&lt;!-- APU-END --&gt;</p>\n<!-- APU-ENDING -->\n<!-- more -->';
+  assert.equal(V.stripEndMarkers(keep), keep);
+  assert.equal(V.stripEndMarkers(''), '');
+  assert.equal(V.stripEndMarkers(null), '');
+});
+
+test('END_MARKER_MISSING: a required end marker must be there (truncated reply); the marker itself is not compared', () => {
+  const r = validate(GOOD + '\n' + END + '\n', GATE);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.warnings, []); // no NEW_HTML_COMMENT for the marker
+  assert.equal(validate(GOOD + '\n<!--apu-end-->', GATE).pass, true);
+  expectError(validate(GOOD, GATE), 'END_MARKER_MISSING');
+  const cut = GOOD.slice(0, Math.floor(GOOD.length * 0.6));
+  expectError(validate(cut, GATE), 'END_MARKER_MISSING');
+  assert.equal(validate(GOOD, GATE).errors[0].code, 'END_MARKER_MISSING');
+  // not required: no error; requireEndMarker without endMarker uses the default APU-END
+  assert.equal(validate(GOOD, { endMarker: 'APU-END' }).pass, true);
+  assert.equal(validate(GOOD + '\n' + END, { endMarker: 'APU-END' }).pass, true);
+  expectError(validate(GOOD, { requireEndMarker: true }), 'END_MARKER_MISSING');
+  assert.equal(validate(GOOD + '\n' + END, { requireEndMarker: true }).pass, true);
+  // requireEndMarker must be exactly true
+  assert.equal(validate(GOOD, { endMarker: 'APU-END', requireEndMarker: 'yes' }).pass, true);
+  // without endMarker options the marker is just a new comment (old behaviour)
+  expectWarning(validate(GOOD + '\n' + END), 'NEW_HTML_COMMENT');
+});
+
+test('TABLE_LOSS (hard): a table or a table row removed; LIST_LOSS (warning): more than 30% of list items gone', () => {
+  assert.deepEqual(V.validateArticle(T_ORIG, T_GOOD, OPTS).errors, []);
+  const oneRowLess = replaceOnce(T_GOOD, '<tr><td>Family car</td><td>32 to 35 psi</td></tr>', '');
+  expectError(V.validateArticle(T_ORIG, oneRowLess, OPTS), 'TABLE_LOSS');
+  expectError(V.validateArticle(T_ORIG, replaceOnce(T_GOOD, TABLE_BLOCK, ''), OPTS), 'TABLE_LOSS');
+  // the table turned into a list: rows are gone
+  const asList = replaceOnce(T_GOOD, TABLE_BLOCK, '<!-- wp:list -->\n<ul class="wp-block-list"><li>Small car: 30 to 32 psi</li><li>Family car: 32 to 35 psi</li></ul>\n<!-- /wp:list -->');
+  expectError(V.validateArticle(T_ORIG, asList, OPTS), 'TABLE_LOSS');
+  // an added row is fine
+  const moreRows = replaceOnce(T_GOOD, '</tbody>', '<tr><td>SUV</td><td>35 to 38 psi</td></tr></tbody>');
+  assert.equal(V.validateArticle(T_ORIG, moreRows, OPTS).pass, true);
+
+  const listO = '<p>Here is what you need to check tyre pressure at home today.</p><ul><li>A gauge</li><li>A pump</li><li>The door sticker</li><li>Five minutes</li></ul>';
+  const r = V.validateArticle(listO, replaceOnce(listO, '<li>The door sticker</li><li>Five minutes</li>', ''), OPTS);
+  expectWarning(r, 'LIST_LOSS');
+  assert.ok(!codes(r.errors).includes('LIST_LOSS'));
+  // one of four gone (25%) is not reported
+  const r2 = V.validateArticle(listO, replaceOnce(listO, '<li>Five minutes</li>', ''), OPTS);
+  assert.ok(!codes(r2.warnings).includes('LIST_LOSS'));
+});
+
+test('CLASSIC_CONVERSION (warning): an edit with no block comments at all skips the media-block checks; plugin blocks stay hard', () => {
+  // plugin-free pair: the stripped edit passes with only the warning
+  const o = withoutPluginBlocks(ORIG);
+  const e = withoutPluginBlocks(GOOD);
+  assert.deepEqual(V.validateArticle(o, e, OPTS).errors, []);
+  const r = V.validateArticle(o, stripBlockComments(e), OPTS);
+  assert.deepEqual(r.errors, []);
+  expectWarning(r, 'CLASSIC_CONVERSION');
+  // with plugin blocks in the original: PLUGIN_BLOCK_CHANGED is still a hard error, no MEDIA_BLOCK_CHANGED / BLOCK_UNBALANCED
+  const r2 = validate(stripBlockComments(GOOD));
+  expectError(r2, 'PLUGIN_BLOCK_CHANGED');
+  expectWarning(r2, 'CLASSIC_CONVERSION');
+  assert.ok(!codes(r2.errors).includes('MEDIA_BLOCK_CHANGED'));
+  assert.ok(!codes(r2.errors).includes('BLOCK_UNBALANCED'));
+  // only SOME block comments removed: the media-block check still applies, no classic-conversion warning
+  const partial = replaceOnce(e, '<!-- wp:image {"id":101,"sizeSlug":"large","linkDestination":"none"} -->\n', '');
+  const r3 = V.validateArticle(o, partial, OPTS);
+  expectError(r3, 'MEDIA_BLOCK_CHANGED');
+  assert.ok(!codes(r3.warnings).includes('CLASSIC_CONVERSION'));
+  // a classic original stays classic: no warning
+  assert.ok(!codes(V.validateArticle(ORIG_C, GOOD_C, OPTS_C).warnings).includes('CLASSIC_CONVERSION'));
+  // image checks are not relaxed by the conversion
+  expectError(V.validateArticle(o, stripBlockComments(replaceOnce(e, 'height="', 'height="1')), OPTS), 'IMG_CHANGED');
+});
+
+test('webSearchAllowed: false = no research (like webSearchCount 0, and it wins); true = unknown or some research', () => {
+  const n = V._internal.normalizeOptions;
+  assert.equal(n({ webSearchAllowed: false }).webSearchCount, 0);
+  assert.equal(n({ webSearchAllowed: 'no' }).webSearchCount, 0);
+  assert.equal(n({ webSearchAllowed: false, webSearchCount: 4 }).webSearchCount, 0);
+  assert.equal(n({ webSearchAllowed: true }).webSearchCount, null);
+  assert.equal(n({ webSearchAllowed: true, webSearchCount: 3 }).webSearchCount, 3);
+  assert.equal(n({ webSearchAllowed: true, webSearchCount: 0 }).webSearchCount, 0);
+  assert.equal(n({}).webSearchCount, null);
+  // Last checked line and new figures
+  const line = para('<em>Last checked: 2026-09-26. Dates and figures were verified against official sources.</em>');
+  const edited = replaceOnce(GOOD, QA_BOX_START, line + '\n\n' + QA_BOX_START);
+  expectError(validate(edited, { webSearchAllowed: false }), 'LAST_CHECKED_WITHOUT_RESEARCH');
+  assert.equal(validate(edited, { webSearchAllowed: true }).pass, true);
+  const priced = insertBeforeSnippet(GOOD, para('A digital gauge costs about $25 in 2026 and lasts for years if you store it well.'));
+  expectError(validate(priced, { webSearchAllowed: false }), 'NEW_NUMBER_WITHOUT_RESEARCH');
+  assert.equal(validate(priced, { webSearchAllowed: true }).pass, true);
+  // links: deep links unwrapped, homepages kept
+  const e = sEdited('<a href="https://www.who.int/news/item/1">deep</a>, <a href="https://www.who.int/">home</a>.');
+  const s = V.sanitizeLinks(S_ORIG, e, { webSearchAllowed: false });
+  assert.ok(s.html.includes('deep, <a href="https://www.who.int/">home</a>.'));
+  assert.deepEqual(s.removed.map((x) => x.reason), ['deep_link_without_research']);
+  assert.equal(V.sanitizeLinks(S_ORIG, e, { webSearchAllowed: true }).removed.length, 0);
+});
+
+test('runSafetyGate: a good edit with the end marker => ok, marker-free sanitized html, link checked', async () => {
+  const calls = [];
+  const r = await V.runSafetyGate(ORIG, GOOD + '\n' + END + '\n', Object.assign({}, GATE, { fetchFn: makeFetch({}, calls) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.deepEqual(Object.keys(r).filter((k) => ['ok', 'html', 'errors', 'warnings', 'removedLinks', 'linkResults', 'stats'].includes(k)).sort(),
+    ['errors', 'html', 'linkResults', 'ok', 'removedLinks', 'stats', 'warnings']);
+  assert.equal(r.html, GOOD + '\n');
+  assert.ok(!/APU-END/i.test(r.html));
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.warnings, []);
+  assert.deepEqual(r.removedLinks, []);
+  assert.deepEqual(r.linkResults.map((x) => [x.url, x.verdict]), [['https://www.tyresafe.org/', 'ok']]);
+  assert.deepEqual(calls, [['HEAD', 'https://www.tyresafe.org/']]);
+  assert.equal(r.stats.endMarkerFound, true);
+  assert.equal(r.stats.images, 2);
+  assert.equal(r.changed, true);
+  // CRLF reply and a marker left in the reference by an earlier run
+  const r2 = await V.runSafetyGate(ORIG + '\n' + END + '\n', (GOOD + '\n' + END).replace(/\n/g, '\r\n'), Object.assign({}, GATE, NOFETCH));
+  assert.equal(r2.ok, true, JSON.stringify(r2.errors));
+  assert.equal(r2.html, GOOD + '\n');
+  // the extension's real call shape (browser mode): webSearchAllowed false keeps the homepage link
+  const r3 = await V.runSafetyGate(ORIG, GOOD + '\n' + END, { siteDomains: ['tubetyre.com'], allowNewFaq: true, webSearchAllowed: false,
+    checkLinks: true, endMarker: 'APU-END', requireEndMarker: true, fetchFn: makeFetch({}) });
+  assert.equal(r3.ok, true, JSON.stringify(r3.errors));
+  assert.ok(r3.html.includes('https://www.tyresafe.org/'));
+});
+
+test('runSafetyGate: dead, unverified and no-research links are unwrapped; the result is still ok', async () => {
+  let r = await V.runSafetyGate(ORIG, GOOD + '\n' + END, Object.assign({}, GATE, { fetchFn: makeFetch({ 'https://www.tyresafe.org/': () => ({ status: 404 }) }) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.ok(!r.html.includes('tyresafe.org'));
+  assert.deepEqual(r.removedLinks.map((x) => [x.url, x.reason]), [['https://www.tyresafe.org/', 'dead'], ['https://www.tyresafe.org/', 'dead']]);
+  const deep = insertBeforeSnippet(GOOD, para('See <a href="https://www.who.int/invented/page">the WHO page</a> for more.')) + '\n' + END;
+  r = await V.runSafetyGate(ORIG, deep, Object.assign({}, GATE, { fetchFn: makeFetch({ 'https://www.who.int/invented/page': () => ({ status: 403 }) }) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.ok(r.html.includes('See the WHO page for more.'));
+  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['unverified']);
+  const calls = [];
+  r = await V.runSafetyGate(ORIG, deep, Object.assign({}, GATE, { webSearchAllowed: false, fetchFn: makeFetch({}, calls) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['deep_link_without_research']);
+  assert.deepEqual(calls, [['HEAD', 'https://www.tyresafe.org/']]); // the deep link is not even fetched
+  // checkLinks false: nothing is fetched
+  const none = [];
+  r = await V.runSafetyGate(ORIG, deep, Object.assign({}, GATE, { checkLinks: false, fetchFn: makeFetch({}, none) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.deepEqual(none, []);
+  assert.deepEqual(r.linkResults, []);
+  // tracking parameters are removed from new links
+  r = await V.runSafetyGate(ORIG, replaceAll(GOOD, 'https://www.tyresafe.org/', 'https://www.tyresafe.org/?utm_source=chatgpt.com') + '\n' + END,
+    Object.assign({}, GATE, { fetchFn: makeFetch({}) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.ok(!r.html.includes('utm_source'));
+  assert.equal(r.changedLinks.length, 2);
+});
+
+test('runSafetyGate: bad edits fail closed (html = reference, candidateHtml = the rejected edit); never throws', async () => {
+  const noImg = replaceOnce(GOOD, '<img', '<span') + '\n' + END;
+  let r = await V.runSafetyGate(ORIG, noImg, Object.assign({}, GATE, NOFETCH));
+  expectError(r, 'IMG_COUNT');
+  assert.equal(r.ok, false);
+  assert.equal(r.html, ORIG);
+  assert.ok(r.candidateHtml.includes('<span'));
+  assert.ok(r.errors.every((e) => typeof e.code === 'string' && typeof e.message === 'string'));
+  // truncated: no end marker (first error)
+  r = await V.runSafetyGate(ORIG, GOOD.slice(0, Math.floor(GOOD.length * 0.6)), Object.assign({}, GATE, NOFETCH));
+  expectError(r, 'END_MARKER_MISSING');
+  assert.equal(r.errors[0].code, 'END_MARKER_MISSING');
+  assert.equal(r.stats.endMarkerFound, false);
+  // only the marker is missing: still blocked
+  r = await V.runSafetyGate(ORIG, GOOD, Object.assign({}, GATE, NOFETCH));
+  assert.deepEqual(codes(r.errors), ['END_MARKER_MISSING']);
+  // a table row lost
+  r = await V.runSafetyGate(T_ORIG, replaceOnce(T_GOOD, '<tr><td>Small car</td><td>30 to 32 psi</td></tr>', '') + '\n' + END, Object.assign({}, GATE, NOFETCH));
+  expectError(r, 'TABLE_LOSS');
+  // empty edit, or just the marker
+  r = await V.runSafetyGate(ORIG, '  \n' + END + '\n', Object.assign({}, GATE, NOFETCH));
+  expectError(r, 'PARSE_EMPTY_HTML');
+  r = await V.runSafetyGate(ORIG, undefined, Object.assign({}, GATE, NOFETCH));
+  expectError(r, 'PARSE_EMPTY_HTML');
+  // no own-site domain and nothing to infer it from
+  r = await V.runSafetyGate(S_ORIG, S_ORIG + '\n' + para('More text.'), NOFETCH);
+  expectError(r, 'CONFIG_MISSING');
+  // inferred from upload URLs: warning, still ok
+  r = await V.runSafetyGate(ORIG, GOOD, NOFETCH);
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  expectWarning(r, 'SITE_DOMAINS_INFERRED');
+  // anything that throws inside => INTERNAL_ERROR, the reference is returned
+  const boom = { get siteDomains() { throw new Error('boom'); } };
+  r = await V.runSafetyGate(ORIG, GOOD, boom);
+  expectError(r, 'INTERNAL_ERROR');
+  assert.equal(r.html, ORIG);
+  const bad = await V.runSafetyGate(ORIG, GOOD + '\n' + END, Object.assign({}, GATE, { fetchFn: () => { throw new Error('network down'); } }));
+  assert.equal(bad.ok, true, JSON.stringify(bad.errors)); // a homepage link that could not be checked is kept
+  expectWarning(bad, 'LINK_CHECK_INCONCLUSIVE');
+});
+
+test('filterAuditIssues accepts the extension fact-check reply contract (```json block, verdict + issues)', () => {
+  const reply = 'Summary line.\n```json\n' + JSON.stringify({ verdict: 'fix', issues: [
+    { severity: 'high', category: 'new_claim_unverified', quote: 'Most cars need between 30 and 35 psi', problem: 'Changed range.', fix: 'Keep the original range.' },
+    { severity: 'medium', category: 'info_lost', quote: 'this sentence is not in the article at all anywhere', problem: 'p', fix: 'f' },
+    { severity: 'low', category: 'off_topic', quote: 'before you drive', problem: 'p', fix: 'f' }
+  ] }) + '\n```';
+  const r = V.filterAuditIssues(AUDIT_HTML, reply);
+  assert.equal(r.valid, true);
+  assert.equal(r.verdict, 'fix');
+  assert.equal(r.effectiveVerdict, 'fix');
+  assert.deepEqual(r.issues.map((i) => i.severity), ['high', 'low']);
+  assert.equal(r.dropped.length, 1);
+  assert.deepEqual(r.retryIssues.map((i) => i.severity), ['high', 'low']);
+  assert.equal(r.retryIssues[0].fix, 'Keep the original range.');
+  // "fix" with only medium/low issues left is a pass (the contract: fix = at least one high issue)
+  const r2 = V.filterAuditIssues(AUDIT_HTML, { verdict: 'fix', issues: [{ severity: 'medium', category: 'x', quote: 'before you drive', problem: 'p', fix: 'f' }] });
+  assert.equal(r2.effectiveVerdict, 'pass');
+  // "PASS" in capitals, missing issues
+  assert.equal(V.filterAuditIssues(AUDIT_HTML, { verdict: 'PASS' }).effectiveVerdict, 'pass');
+  assert.equal(V.filterAuditIssues(AUDIT_HTML, { verdict: 'maybe', issues: [] }).effectiveVerdict, 'reject');
+});
+
+test('browser build: the file loaded as a classic worker script exposes self.SafetyGate; require() adds no global', async () => {
+  const vm = require('node:vm');
+  const src = fs.readFileSync(SCRIPT, 'utf8');
+  const ctx = { console, setTimeout, clearTimeout, AbortController, Promise };
+  ctx.self = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(src, ctx, { filename: 'safety-gate.js' });
+  const G = ctx.SafetyGate;
+  assert.ok(G && typeof G === 'object');
+  assert.deepEqual(Object.keys(G).sort(), ['ERROR_CODES', 'VERSION', 'WARNING_CODES', 'checkLinks', 'filterAuditIssues', 'findNewLinks',
+    'runSafetyGate', 'sanitizeLinks', 'stripEndMarkers', 'validateArticle'].sort());
+  assert.equal(G.VERSION, V.VERSION);
+  assert.ok(G.ERROR_CODES.includes('END_MARKER_MISSING') && G.ERROR_CODES.includes('TABLE_LOSS'));
+  assert.ok(G.WARNING_CODES.includes('LIST_LOSS') && G.WARNING_CODES.includes('CLASSIC_CONVERSION'));
+  const r = await G.runSafetyGate(ORIG, GOOD + '\n' + END, Object.assign({}, GATE, { fetchFn: makeFetch({}) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.html, GOOD + '\n');
+  // Node: module.exports only
+  const out = spawnSync(process.execPath, ['-e', 'const V=require(' + JSON.stringify(SCRIPT) + ');' +
+    'console.log(typeof globalThis.SafetyGate, typeof V.runSafetyGate, typeof V.stripEndMarkers)'], { encoding: 'utf8' });
+  assert.equal(out.stdout.trim(), 'undefined function function');
+});
+
+test('extension/safety-gate.js is a byte-identical copy of this file (when the extension is next to it)', (t) => {
+  const copy = path.join(__dirname, '..', '..', 'extension', 'safety-gate.js');
+  if (!fs.existsSync(copy)) { t.skip('no extension folder'); return; }
+  assert.ok(fs.readFileSync(copy).equals(fs.readFileSync(SCRIPT)), 'extension/safety-gate.js differs from automation/validate-article.js');
+});
+
+test('n8n paste: runSafetyGate and stripEndMarkers also work as a plain function body', async () => {
+  const src = fs.readFileSync(SCRIPT, 'utf8');
+  const fn = new Function(src + '\nreturn { runSafetyGate, stripEndMarkers };');
+  const api = fn();
+  assert.equal(api.stripEndMarkers('<p>a</p>\n' + END), '<p>a</p>\n');
+  const r = await api.runSafetyGate(ORIG, GOOD + '\n' + END, Object.assign({}, GATE, NOFETCH));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+});
+
+// ---------------------------------------------------------------------------------------------
 // performance and robustness
 // ---------------------------------------------------------------------------------------------
 function bigArticle(base, targetBytes) {

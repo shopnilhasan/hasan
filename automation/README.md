@@ -277,7 +277,7 @@ add_action( 'init', function () {
   - After the POST, read the meta again. If the values are not there, log `meta_not_saved`. The article itself is fine.
 
 ```js
-// V = require('./automation/validate-article.js'); visibleText is an internal helper of version 1.1.0
+// V = require('./automation/validate-article.js'); visibleText is an internal helper of version 1.2.0
 function safeSeoText(text, finalHtml) {
   const t = String(text || '').replace(/\s+/g, ' ').trim();
   if (!t || /[<>{}\[\]]|\bTODO\b|\bTBD\b/.test(t)) return '';
@@ -332,7 +332,7 @@ node -e "const V=require('./automation/validate-article.js'),fs=require('fs'),a=
 
 Exit 0 = pass. Exit 2 = fix or reject (read `effectiveVerdict` and `retryIssues` in `audit-result.json`). Exit 1 = a file is missing, so keep original.
 
-**JavaScript API.** Exports: `parseEditorOutput`, `findNewLinks`, `checkLinks`, `sanitizeLinks`, `validateArticle`, `filterAuditIssues`, `processEditorOutput`, `runCli`, `ERROR_CODES`, `WARNING_CODES`, `DEFAULT_FORBIDDEN_LINK_DOMAINS`, `REDIRECT_LINK_DOMAINS`, `BOX_TYPES`, `VERSION`.
+**JavaScript API.** Exports: `parseEditorOutput`, `findNewLinks`, `checkLinks`, `sanitizeLinks`, `validateArticle`, `filterAuditIssues`, `processEditorOutput`, `runSafetyGate`, `stripEndMarkers`, `runCli`, `ERROR_CODES`, `WARNING_CODES`, `DEFAULT_FORBIDDEN_LINK_DOMAINS`, `REDIRECT_LINK_DOMAINS`, `BOX_TYPES`, `VERSION`.
 
 Steps 2 to 7 for one post. Paste `fillPrompt`, `retryText` (section 3) and `sseToMessage` + `callClaude` (section 4) into the same file. `s` holds your settings. It returns `publish` with the HTML to write, or `keep_original` or `skip`, and fills `log`:
 
@@ -422,12 +422,16 @@ Options for `processEditorOutput` (and `validateArticle`):
 | `today` | `''` | `'YYYY-MM-DD'`; with research count `0`, adding today's date is blocked |
 | `checkLinks` | `true` | `false` = do not open new links. **Tests only** (dead and unchecked deep links then stay in) |
 | `fetchFn` | global `fetch` | your own fetch function (below) |
+| `webSearchAllowed` | – | browser mode, instead of `webSearchCount`: `false` = no research (same as `0`, and it wins over a count), `true` = unknown or some research |
+| `endMarker` / `requireEndMarker` | `''` / `false` | e.g. `'APU-END'`: `<!-- APU-END -->` comments are removed before the comparison; with `requireEndMarker: true` an edit without one is `END_MARKER_MISSING` (cut off) |
 | `linkTimeoutMs` / `linkConcurrency` | `10000` / `4` | link check timeout and parallel requests |
 | `forbiddenLinkDomains` | the default list | replaces the default list; to add sites, use `V.DEFAULT_FORBIDDEN_LINK_DOMAINS.concat(['somecouponsite.com'])`. Short-link and redirect hosts (`REDIRECT_LINK_DOMAINS`) are always removed anyway |
 | `minWordRatio` / `maxWordRatio` / `minRetention` | `0.8` / `5` / `0.75` | limits for `CONTENT_LOSS`, `WORD_RATIO_EXTREME` and `CONTENT_RETENTION` |
 
 The result has: `action` (`publish`, `keep_original`, `skip`), `html` (the cleaned edit on publish, else the original), `changed` (false = nothing to write), `candidateHtml`, `meta`, `errors`, `warnings`, `removedLinks` (`{url, reason}`), `changedLinks` (links with tracking parts cut), `linkResults`, `stats` (including `wordRetention`).
 `filterAuditIssues` returns the audit with `verdict`, `effectiveVerdict`, `issues` (kept), `dropped` (quote not in the article), `retryIssues`, `blocking` (true unless `effectiveVerdict` is `pass`) and `valid` (false = not JSON).
+
+**Browser extension (`runSafetyGate`).** The Chrome extension (Auto Post Updater Pro) ships this file byte-identical as `extension/safety-gate.js` and loads it with `importScripts`; it then finds everything in one global object, `self.SafetyGate` (`VERSION`, `runSafetyGate`, `stripEndMarkers`, `filterAuditIssues`, `validateArticle`, `sanitizeLinks`, `checkLinks`, `findNewLinks`, `ERROR_CODES`, `WARNING_CODES`). A chat website gives no META, so it calls `runSafetyGate(referenceHtml, aiHtml, options)` on the extracted article: end markers removed, new links found, checked (`checkLinks`, `fetchFn`), cleaned, then `validateArticle`. It never throws and resolves to `{ ok, html, errors, warnings, removedLinks, linkResults, stats, changedLinks, candidateHtml, changed }`. Save `html` only when `ok` is true (it is then the cleaned, marker-free edit); when `ok` is false, `html` is the reference and nothing may be saved. After a copy, `node --test automation/test/` checks that the two files are still identical.
 
 **Link results.**
 - `ok` (2xx/3xx) = kept. But it counts as dead when a deep link lands on the site's homepage (a hidden "not found") or on a domain-parking page. It is removed with reason `redirect` when it lands on another site.
@@ -488,15 +492,15 @@ Any **error** means keep original. **Warnings** are only logged.
 
 | Group | Error codes |
 |---|---|
-| Reading the answer, setup | `PARSE_MISSING_MARKER` (a marker is missing, or the answer was cut off), `PARSE_META_JSON` (META unreadable or without `status`), `PARSE_EMPTY_HTML` (status `edited` but no HTML), `CONFIG_MISSING` (no site domain), `INTERNAL_ERROR` (the validator crashed) |
+| Reading the answer, setup | `PARSE_MISSING_MARKER` (a marker is missing, or the answer was cut off), `PARSE_META_JSON` (META unreadable or without `status`), `PARSE_EMPTY_HTML` (status `edited` but no HTML), `CONFIG_MISSING` (no site domain), `INTERNAL_ERROR` (the validator crashed), `END_MARKER_MISSING` (browser mode: the required `<!-- APU-END -->` is missing, so the reply was cut off) |
 | Images and media | `IMG_COUNT`, `IMG_CHANGED` (an image changed apart from its alt text, or moved under another heading), `MEDIA_COUNT`, `MEDIA_CHANGED` (a video, iframe, source, embed, ad or form tag changed), `ELEMENT_COUNT` (form, button, ad count), `EMBED_URL_MISSING` (a video or post embed URL line changed or gone), `MEDIA_BLOCK_CHANGED` |
 | Shortcodes, blocks, scripts | `SHORTCODE_MISSING`, `SHORTCODE_ADDED` (new shortcode or `[bracket]` text), `PLUGIN_BLOCK_CHANGED`, `BLOCK_MARKUP_MISMATCH` (a heading level or list type does not match its block comment), `BLOCK_COMMENTS_IN_CLASSIC`, `BLOCK_UNBALANCED`, `SCRIPT_CHANGED`, `SPECIAL_COMMENT_MISSING` (`<!--more-->`, `<!--nextpage-->`), `MALFORMED_COMMENT`, `JSONLD_INVALID`, `JSONLD_TYPE` |
 | Links and ids | `LINK_MISSING`, `LINK_ATTR_CHANGED` (`rel="nofollow"`, `sponsored` or `ugc` dropped), `ID_MISSING`, `NEW_INTERNAL_LINK`, `BAD_NEW_LINK` |
 | HTML shape | `FORBIDDEN_TAG` (new h1, style, script, input and similar), `FIRST_ELEMENT_NOT_P`, `TITLE_IN_BODY`, `HEADING_ORDER`, `TAG_UNBALANCED`, `STRAY_TEXT` (chat text such as "Here is the edited article"), `MARKDOWN` (markdown or citation marks), `CODE_FENCE`, `PLACEHOLDER` (`{{`, `[VERIFY`, `TODO:`, `[Your Name]`, `example.com` and similar, also inside schema), `OMISSION_MARKER` ("rest unchanged" notes) |
-| Amount of text | `CONTENT_LOSS` (under 80% of the words), `CONTENT_RETENTION` (under 75% of the original's words still there; originals of 100+ words), `WORD_RATIO_EXTREME` (over 5 times longer; very short articles may grow to about 600 words), `DUPLICATE_CONTENT` |
+| Amount of text | `CONTENT_LOSS` (under 80% of the words), `CONTENT_RETENTION` (under 75% of the original's words still there; originals of 100+ words), `WORD_RATIO_EXTREME` (over 5 times longer; very short articles may grow to about 600 words), `DUPLICATE_CONTENT`, `TABLE_LOSS` (fewer `<table>` or `<tr>` than the original) |
 | Prompt rules | `BOX_DUPLICATED` (second Quick Answer, Key Takeaways or At a Glance), `SECTION_DUPLICATED` (second FAQ, Sources list or Last checked line), `NEW_FAQ_NOT_ALLOWED`, `LAST_CHECKED_NOT_ALLOWED`, and three that apply only when the research count is 0: `LAST_CHECKED_WITHOUT_RESEARCH` (new Last checked line, "updated/verified" wording, or today's date), `NEW_NUMBER_WITHOUT_RESEARCH` (new price, percentage or year), `NUMBER_MISSING` (a price, percentage or year of the original is gone) |
 
-Warning codes: `AI_PHRASE`, `WORD_RATIO_HIGH`, `BOX_LIMIT`, `FAQ_SCHEMA_MISMATCH`, `META_LENGTH` (`SEO title is ...` or `Meta description is ...`), `META_JSON_INVALID` (META broken but its status readable; research then counts as not used), `NEW_CONCLUSION`, `EMOJI_ADDED`, `LINK_IN_HEADING`, `DUPLICATE_NEW_LINK`, `SOURCES_MISMATCH`, `NEW_HTML_COMMENT`, `LINK_CHECK_UNAVAILABLE`, `LINK_CHECK_INCONCLUSIVE`, `SITE_DOMAINS_INFERRED`.
+Warning codes: `AI_PHRASE`, `WORD_RATIO_HIGH`, `BOX_LIMIT`, `FAQ_SCHEMA_MISMATCH`, `META_LENGTH` (`SEO title is ...` or `Meta description is ...`), `META_JSON_INVALID` (META broken but its status readable; research then counts as not used), `NEW_CONCLUSION`, `EMOJI_ADDED`, `LINK_IN_HEADING`, `DUPLICATE_NEW_LINK`, `SOURCES_MISMATCH`, `NEW_HTML_COMMENT`, `LINK_CHECK_UNAVAILABLE`, `LINK_CHECK_INCONCLUSIVE`, `SITE_DOMAINS_INFERRED`, `LIST_LOSS` (over 30% of the list items gone), `CLASSIC_CONVERSION` (a block-editor original came back with no block comments at all; `MEDIA_BLOCK_CHANGED` and `BLOCK_UNBALANCED` are then skipped, `PLUGIN_BLOCK_CHANGED` still applies).
 
 ## 10. Cost and safety tips
 
@@ -518,7 +522,7 @@ Warning codes: `AI_PHRASE`, `WORD_RATIO_HIGH`, `BOX_LIMIT`, `FAQ_SCHEMA_MISMATCH
 
 - `article-editor-prompt.txt`: the editor prompt (automation edition of Prompt 2). Fill its 9 SETTINGS lines and `<article_html>`.
 - `fact-audit-prompt.txt`: the second-AI fact check. Fill its 2 SETTINGS lines, `<original_html>` and `<edited_html>`.
-- `validate-article.js`: all code checks (parse, link check, link cleaning, validate, audit filter). Command line or `require()` or paste. Version 1.1.0.
+- `validate-article.js`: all code checks (parse, link check, link cleaning, validate, audit filter). Command line or `require()` or paste. Version 1.2.0. The browser extension uses a byte-identical copy (`extension/safety-gate.js`).
 - `test/run-tests.test.js`: tests for every error and warning code (`node --test automation/test/`).
 - `test/mutation-check.js`: checks that the tests notice when a safety rule is weakened (`node automation/test/mutation-check.js --run`).
 - `test/package.json`: lets `node --test automation/test/` work on Node 22 and newer.

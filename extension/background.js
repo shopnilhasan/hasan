@@ -5200,8 +5200,12 @@ function parseFactCheckReply(text) {
 
 // audit (parsed reply) → { action: 'pass'|'fix'|'fail', filtered }. Issues whose
 // quote is not in the edited article are dropped first (filterAuditIssues).
-// reject → fail; any remaining HIGH issue, or verdict "fix" with remaining
-// issues → fix; otherwise pass (medium/low issues are only logged).
+// The shared filter's effectiveVerdict decides: reject → fail; fix (a HIGH
+// issue is left, or a HIGH issue's quote was not found — never downgraded) →
+// fix round with filtered.retryIssues; pass → pass (medium/low issues are only
+// logged). Without the filter (or without effectiveVerdict) the conservative
+// rule below applies: reject → fail; any HIGH issue, or verdict "fix" with
+// issues → fix; otherwise pass. filtered.retryIssues is always an array.
 function decideFactCheck(audit, editedHtml, originalHtml) {
   const verdict = String((audit && audit.verdict) || '').trim().toLowerCase();
   const api = safetyGateApi();
@@ -5227,10 +5231,16 @@ function decideFactCheck(audit, editedHtml, originalHtml) {
     };
   }
   const kept = Array.isArray(filtered.issues) ? filtered.issues : [];
+  const effective = String(filtered.effectiveVerdict || '').trim().toLowerCase();
   let action = 'pass';
-  if (filtered.valid === false || ['pass', 'fix', 'reject'].indexOf(verdict) === -1 || verdict === 'reject') action = 'fail';
+  if (filtered.valid === false) action = 'fail';
+  else if (['pass', 'fix', 'reject'].indexOf(effective) !== -1) action = (effective === 'reject') ? 'fail' : effective;
+  else if (['pass', 'fix', 'reject'].indexOf(verdict) === -1 || verdict === 'reject') action = 'fail';
   else if (kept.some((i) => String((i && i.severity) || '').toLowerCase() === 'high')) action = 'fix';
   else if (verdict === 'fix' && kept.length > 0) action = 'fix';
+  // The issues the fix round must address (the filter's retryIssues include a
+  // HIGH issue whose quote was not found); fallback: the kept issues.
+  if (!Array.isArray(filtered.retryIssues) || !filtered.retryIssues.length) filtered.retryIssues = kept.slice();
   return { action, filtered };
 }
 
@@ -5244,15 +5254,24 @@ function factIssueText(issue) {
 }
 
 // The PRIORITY FIX note for the fix round (reuses the auditFixNote path).
+// filteredIssues = the filter's retryIssues (an array), or the filtered
+// audit itself (its retryIssues are used, else its issues). A HIGH issue whose
+// quote was not found word for word is still listed (quoteNotFound).
 function buildFactCheckFixNote(filteredIssues) {
-  const issues = Array.isArray(filteredIssues) ? filteredIssues : [];
+  const src = filteredIssues;
+  let issues = [];
+  if (Array.isArray(src)) issues = src;
+  else if (src && typeof src === 'object') {
+    issues = (Array.isArray(src.retryIssues) && src.retryIssues.length) ? src.retryIssues : (Array.isArray(src.issues) ? src.issues : []);
+  }
   const clip = (v, max) => String(v === undefined || v === null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max);
   const lines = issues.slice(0, 15).map((i, n) => {
     const it = i || {};
     return (n + 1) + '. [' + String(it.severity || 'high').toUpperCase() + (it.category ? ' / ' + clip(it.category, 40) : '') + '] ' +
       'Problem: ' + (clip(it.problem, 400) || 'not described') + '.' +
       (it.fix ? ' Fix: ' + clip(it.fix, 400) + '.' : '') +
-      (it.quote ? ' Text in your previous edit: "' + clip(it.quote, 300) + '".' : '');
+      (it.quote ? (it.quoteNotFound ? ' Text the fact-checker quoted (not found word for word in your edit): "' : ' Text in your previous edit: "') +
+        clip(it.quote, 300) + '".' : '');
   });
   return 'A fact-check of your previous edit of this exact article found the problems listed below. ' +
     'Start again from the ORIGINAL article HTML above, fix every one of these problems, and keep following all other instructions exactly.\n' +
@@ -5286,7 +5305,9 @@ function factCheckError(reason, aiSessionUrl) {
 }
 
 function factCheckBlockedError(fc, afterFixRound, extraReason) {
-  const issues = Array.isArray(fc && fc.issues) ? fc.issues : [];
+  // The blocking issues (retryIssues also hold a HIGH issue whose quote was not found).
+  const issues = (fc && Array.isArray(fc.retryIssues) && fc.retryIssues.length) ? fc.retryIssues :
+    (Array.isArray(fc && fc.issues) ? fc.issues : []);
   let msg = 'FACT CHECK BLOCKED: verdict "' + safetyMessageText((fc && fc.verdict) || '?') + '"' +
     (issues.length ? ', ' + issues.length + ' issue(s)' : '') +
     (afterFixRound ? ' after the fix round' : '');
@@ -5539,10 +5560,13 @@ async function runFactCheck(ctx) {
   }
   const decision = decideFactCheck(parsed.audit, edited, reference);
   const filtered = decision.filtered || {};
+  const issues = Array.isArray(filtered.issues) ? filtered.issues : [];
   return {
     verdict: parsed.audit.verdict,
-    issues: Array.isArray(filtered.issues) ? filtered.issues : [],
+    effectiveVerdict: String(filtered.effectiveVerdict || '').toLowerCase(),
+    issues,
     dropped: Array.isArray(filtered.dropped) ? filtered.dropped : [],
+    retryIssues: Array.isArray(filtered.retryIssues) ? filtered.retryIssues : issues,
     aiSessionUrl,
     action: decision.action,
     aiName: ai.aiName
@@ -5633,16 +5657,17 @@ async function applySafetyPipeline(ctx) {
       log('ok', tag + ' 🔎 Fact check PASSED (verdict "' + fc.verdict + '"' + (fixRoundUsed ? ', after one fix round' : '') + ').');
       return html;
     }
-    fc.issues.forEach((i) => log('warn', tag + ' 🔎 ' + factIssueText(i)));
+    const blocking = (Array.isArray(fc.retryIssues) && fc.retryIssues.length) ? fc.retryIssues : fc.issues;
+    blocking.forEach((i) => log('warn', tag + ' 🔎 ' + factIssueText(i) + (i && i.quoteNotFound ? ' [quote not found word for word]' : '')));
     if (fc.action === 'fail' || fixRoundUsed) {
       log('err', tag + ' 🔎 FACT CHECK BLOCKED the edit (verdict "' + fc.verdict + '"' + (fixRoundUsed ? ', after the fix round' : '') + ') — the post is NOT changed.');
       throw factCheckBlockedError(fc, fixRoundUsed);
     }
     // 2.6) Fix round: once per attempt, from the ORIGINAL, in a NEW chat.
     fixRoundUsed = true;
-    const note = buildFactCheckFixNote(fc.issues);
+    const note = buildFactCheckFixNote(blocking);
     log('step', tag + ' 🔧 Fact-check fix round: regenerating from the ORIGINAL article in a NEW chat with ' +
-      fc.issues.length + ' issue(s) attached as a PRIORITY FIX note.');
+      blocking.length + ' issue(s) attached as a PRIORITY FIX note.');
     setStatus(tag + ' 🔧 Fact-check fix round');
     let fixedHtml = '';
     try {
