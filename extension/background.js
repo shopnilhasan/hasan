@@ -62,6 +62,9 @@ let runtime = {
   // End-of-batch retry pass: 0 = main pass, 1 = retrying queued failures.
   retryPass: 0,
   retryQueue: [],
+  // v3.46.0: why a queued post was blocked by the Safety Gate / fact check
+  // (rawSlug -> PRIORITY FIX note), so the end-of-batch retry tells the AI.
+  retryNotes: {},
   // Audit Retry (separate, opt-in): posts whose post-save audit reported
   // issues are queued here for re-processing when timing = "end".
   auditRetryQueue: [],
@@ -243,6 +246,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           runtime.failures = [];
           runtime.attempts = [];
           runtime.retryQueue = [];
+          runtime.retryNotes = {};
           runtime.auditRetryQueue = [];
           runtime.retryPass = 0;
           runtime.slugDurations = [];
@@ -388,6 +392,7 @@ async function persistRuntime() {
       slugDurations: runtime.slugDurations,
       retryPass: runtime.retryPass,
       retryQueue: runtime.retryQueue,
+      retryNotes: runtime.retryNotes,
       auditRetryQueue: runtime.auditRetryQueue,
       parallelDone: runtime.parallelDone,
       sessionId: runtime.sessionId,
@@ -509,6 +514,7 @@ async function loadRuntimeOnce() {
     runtime.slugDurations = Array.isArray(runtime.slugDurations) ? runtime.slugDurations : [];
     runtime.retryPass = Number(runtime.retryPass) || 0;
     runtime.retryQueue = Array.isArray(runtime.retryQueue) ? runtime.retryQueue : [];
+    runtime.retryNotes = (runtime.retryNotes && typeof runtime.retryNotes === 'object' && !Array.isArray(runtime.retryNotes)) ? runtime.retryNotes : {};
     runtime.auditRetryQueue = Array.isArray(runtime.auditRetryQueue) ? runtime.auditRetryQueue : [];
     runtime.parallelDone = Array.isArray(runtime.parallelDone) ? runtime.parallelDone : [];
     runtime.sessionId = Number(runtime.sessionId) || 0;
@@ -866,6 +872,7 @@ async function startBatch(job, options) {
   runtime.slugDurations = [];
   runtime.retryPass = 0;
   runtime.retryQueue = [];
+  runtime.retryNotes = {};
   runtime.auditRetryQueue = [];
   runtime.consecFails = 0;
   runtime.failProbation = false;
@@ -976,6 +983,10 @@ async function processLoop() {
       attemptLinks.auditFixNote = buildAuditFixNote(runtime.job.issueMap[rawSlug]);
       log('info', '[' + num + '/' + total + '] Audit-fix mode: sending this post with its previous audit issues attached to the prompt.');
     }
+    // v3.46.0: automatic retries carry the Safety Gate / fact-check reasons of
+    // the previous attempt as a PRIORITY FIX note (replaced on every retry).
+    const baseFixNote = attemptLinks.auditFixNote || '';
+    if (runtime.retryPass === 1) applyCarriedRetryNote(rawSlug, attemptLinks, baseFixNote, '[' + num + '/' + total + ']');
     // Attempt budget: in "end" retry mode the main pass tries each post ONCE —
     // failed posts are queued and re-tried after all other posts are done
     // (using "Max retries per post" as the attempt budget for that pass).
@@ -993,6 +1004,7 @@ async function processLoop() {
       if (tryNum > 0) {
         log('warn', '↻ Retry ' + tryNum + '/' + inlineRetries + ' for "' + slug + '" (previous: ' + (lastErr?.message || 'unknown') + ')');
         setStatus('[' + num + '/' + total + '] Retry ' + tryNum + '/' + inlineRetries + ' "' + slug + '"');
+        applyRetryFixNote(attemptLinks, baseFixNote, lastErr, '[' + num + '/' + total + ']');
         // Close leftover tabs from the previous attempt
         if (attemptTabs.ai)   { await safeCloseTab(attemptTabs.ai);   attemptTabs.ai = null; }
         if (attemptTabs.edit) { await safeCloseTab(attemptTabs.edit); attemptTabs.edit = null; }
@@ -1026,6 +1038,7 @@ async function processLoop() {
       setStatus('[' + num + '/' + total + '] Trying fallback AI ' + (fb.aiName || ''));
       if (attemptTabs.ai)   { await safeCloseTab(attemptTabs.ai);   attemptTabs.ai = null; }
       if (attemptTabs.edit) { await safeCloseTab(attemptTabs.edit); attemptTabs.edit = null; }
+      applyRetryFixNote(attemptLinks, baseFixNote, lastErr, '[' + num + '/' + total + ']');
       const savedAi = swapJobAi(fb);
       try {
         await processSlug(slug, num, total, attemptLinks, 0, attemptTabs);
@@ -1059,6 +1072,9 @@ async function processLoop() {
       runtime.failures = runtime.failures.filter(f => f.slug !== slug);
       rememberAttempt(rawSlug, slug, 'updated', attemptLinks.auditReport ? ('Updated on WordPress — ' + attemptLinks.auditReport) : 'Updated on WordPress', attemptLinks);
       log('ok', '✓ [' + num + '/' + total + '] ' + slug);
+      // The post is saved: a later Audit Retry must not repeat the gate
+      // reasons of an earlier try (v3.46.0) — only the job's own note stays.
+      setRetryFixNote(attemptLinks, baseFixNote, '');
       // Audit Retry (opt-in): if this saved post's audit reported issues, retry
       // it now (timing=immediate) or queue it for the end pass (timing=end).
       await maybeAuditRetry(rawSlug, slug, num, total, attemptLinks, attemptTabs);
@@ -1107,6 +1123,7 @@ async function processLoop() {
       }
       if (retryMode === 'end' && runtime.retryPass === 0 && lastErr?.code !== 'POST_NOT_FOUND' && lastErr?.code !== 'USER_STOPPED') {
         runtime.retryQueue.push(rawSlug);
+        rememberRetryNote(rawSlug, lastErr, attemptLinks);
         log('info', '[' + num + '/' + total + '] Queued "' + slug + '" for the end-of-batch retry pass.');
       }
       // Repeated failures mean something systemic (site login, AI login, wrong
@@ -1330,6 +1347,177 @@ function buildAuditFixNote(issues) {
     '. This time you MUST fix every one of these issues — restore any missing FAQ, Conclusion, sections or images from the source article — while still following all instructions below.';
 }
 
+// ── v3.46.0: automatic retries tell the AI WHY ─────────────────────────────
+// When a post is blocked by the Safety Gate (SAFETY_GATE) or the fact check
+// (FACT_CHECK) and the batch retries it by itself (inline retries, the
+// end-of-batch retry pass, parallel retries, the fallback AI), the next
+// attempt's prompt carries a PRIORITY FIX note built from the gate errors or
+// the fact-check issues — through the same auditFixNote path as an audit-fix
+// re-run (jobPrompt + PRIORITY FIX block). Every other failure gets no note.
+// The note is REPLACED on each retry (never added up) and is at most
+// RETRY_NOTE_MAX characters. Fast Submit phase 1 never uses it.
+const RETRY_NOTE_MAX = 3000;
+const RETRY_NOTES_MAX_POSTS = 500;
+// Gate codes the editing AI cannot fix (the gate itself could not run).
+const RETRY_NOTE_SKIP_CODES = ['GATE_NOT_LOADED', 'INTERNAL_ERROR', 'GATE_FAILED', 'CONFIG_MISSING', 'PARSE_MISSING_MARKER', 'PARSE_META_JSON'];
+// What to do, in plain words, per Safety Gate code.
+const GATE_RETRY_HINTS = {
+  END_MARKER_MISSING: 'Your reply was cut off. Return the COMPLETE article in ONE code block and make <!-- APU-END --> its last line.',
+  PARSE_EMPTY_HTML: 'Return the complete article HTML inside one code block.',
+  IMG_COUNT: 'Keep every image of the original exactly as it is: the same <img> tags with the same src and attributes, in the same place. Never remove, add or move an image.',
+  IMG_CHANGED: 'Keep every <img> tag of the original unchanged (same src, srcset, size and class, same section); only the alt text may be improved.',
+  MEDIA_COUNT: 'Keep every video, iframe, embed, figure and media element of the original unchanged.',
+  MEDIA_CHANGED: 'Keep every video, iframe, embed, figure and media element of the original unchanged.',
+  MEDIA_BLOCK_CHANGED: 'Keep every image and video block (<!-- wp:image -->, <!-- wp:embed --> ...) of the original unchanged.',
+  ELEMENT_COUNT: 'Keep every form, button and ad block of the original.',
+  EMBED_URL_MISSING: 'Keep every embed / video link line of the original unchanged.',
+  TABLE_LOSS: 'Keep every table and every table row of the original (you may reword cells, never drop rows).',
+  LINK_MISSING: 'Keep every link of the original with exactly the same address (href).',
+  LINK_ATTR_CHANGED: 'Keep the rel attributes (nofollow, sponsored, ugc) of every original link.',
+  ID_MISSING: 'Keep every id attribute of the original (they are jump targets).',
+  NEW_INTERNAL_LINK: 'Do not add new links to this website.',
+  BAD_NEW_LINK: 'Do not add new links unless each one is a normal https link to a real page on another site.',
+  SHORTCODE_MISSING: 'Keep every [shortcode] of the original exactly as it is.',
+  SHORTCODE_ADDED: 'Do not add new [shortcodes].',
+  PLUGIN_BLOCK_CHANGED: 'Keep every plugin block (<!-- wp:plugin/... -->) of the original byte for byte.',
+  BLOCK_MARKUP_MISMATCH: 'Keep every block comment (<!-- wp:... -->) matching its HTML, as in the original.',
+  BLOCK_UNBALANCED: 'Keep every block comment (<!-- wp:... --> and <!-- /wp:... -->) of the original, opened and closed.',
+  BLOCK_COMMENTS_IN_CLASSIC: 'This is a classic post: do not add <!-- wp:... --> block comments.',
+  MALFORMED_COMMENT: 'Close every HTML comment properly.',
+  SPECIAL_COMMENT_MISSING: 'Keep <!--more--> and <!--nextpage--> where they are.',
+  SCRIPT_CHANGED: 'Keep every <script> of the original unchanged.',
+  JSONLD_INVALID: 'Any JSON-LD schema must be valid JSON.',
+  JSONLD_TYPE: 'Keep the JSON-LD schema type of the original.',
+  FORBIDDEN_TAG: 'Do not add <h1>, <style>, <script>, form fields or similar tags.',
+  FIRST_ELEMENT_NOT_P: 'Start the article with its intro paragraph (<p>), not with a heading.',
+  TITLE_IN_BODY: 'Do not repeat the post title at the top of the article.',
+  HEADING_ORDER: 'Keep a clean heading order: h2 for sections, h3 inside them, no jumps.',
+  TAG_UNBALANCED: 'Close every tag you open.',
+  STRAY_TEXT: 'The code block must hold ONLY the article HTML: no chat text before or after it.',
+  MARKDOWN: 'Use HTML only: no Markdown (** or ##) and no citation marks.',
+  CODE_FENCE: 'Do not put ``` code fences inside the article.',
+  PLACEHOLDER: 'Do not leave placeholders ({{...}}, [VERIFY], TODO, example.com) in the article.',
+  OMISSION_MARKER: 'Write out the whole article; never replace parts with notes such as "rest unchanged".',
+  CONTENT_LOSS: 'Keep all the content of the original; edit sentences, do not delete paragraphs or sections.',
+  CONTENT_RETENTION: 'Keep the original text and edit it lightly; do not rewrite or drop whole sections.',
+  WORD_RATIO_EXTREME: 'Do not repeat or pad the article; keep it close to the original length.',
+  DUPLICATE_CONTENT: 'Do not repeat any paragraph.',
+  BOX_DUPLICATED: 'Do not add a second Quick Answer, Key Takeaways or At a Glance box.',
+  SECTION_DUPLICATED: 'Do not add a second FAQ, Sources list or Last checked line.',
+  NEW_FAQ_NOT_ALLOWED: 'Do not add a new FAQ section.',
+  LAST_CHECKED_NOT_ALLOWED: 'Do not add a "Last checked" line.',
+  LAST_CHECKED_WITHOUT_RESEARCH: 'Do not add a "Last checked" / "updated" / "verified" line or today\'s date.',
+  NEW_NUMBER_WITHOUT_RESEARCH: 'Do not add or change prices, percentages or years.',
+  NUMBER_MISSING: 'Keep every price, percentage and year of the original.'
+};
+
+function gateRetryHint(code) {
+  return GATE_RETRY_HINTS[code] || 'Fix this problem.';
+}
+
+// err = the failure of the previous attempt. Returns the PRIORITY FIX note
+// ('' when the failure is not a Safety Gate / fact-check block, or when
+// nothing in it can be fixed by the editing AI).
+function buildGateRetryNote(err) {
+  if (!err || typeof err !== 'object') return '';
+  const clip = (v, max) => safetyMessageText(v).replace(/[.\s]+$/, '').slice(0, max);
+  let head = '';
+  let foot = '';
+  const lines = [];
+  if (err.code === 'SAFETY_GATE') {
+    const byCode = [];
+    const seen = {};
+    (Array.isArray(err.gateReasons) ? err.gateReasons : []).forEach((r) => {
+      const code = String((r && r.code) || '').trim();
+      if (!code || RETRY_NOTE_SKIP_CODES.indexOf(code) >= 0) return;
+      if (!seen[code]) { seen[code] = { code, messages: [] }; byCode.push(seen[code]); }
+      const m = clip(r.message, 220);
+      if (m && seen[code].messages.length < 3 && seen[code].messages.indexOf(m) < 0) seen[code].messages.push(m);
+    });
+    byCode.forEach((g, n) => {
+      lines.push((n + 1) + '. ' + g.code + (g.messages.length ? ' — ' + g.messages.join('; ') : '') + '. ' + gateRetryHint(g.code));
+    });
+    head = 'Your previous edit of this exact article was REJECTED by the automatic Safety Gate, so nothing was saved. It was rejected because:';
+    foot = 'Edit the ORIGINAL article again from the start and make sure none of these problems happens this time, while still following all other instructions exactly.';
+  } else if (err.code === 'FACT_CHECK') {
+    (Array.isArray(err.factIssues) ? err.factIssues : []).slice(0, 8).forEach((i, n) => {
+      const it = (i && typeof i === 'object') ? i : { problem: i };
+      lines.push((n + 1) + '. [' + (clip(it.severity, 10) || 'high').toUpperCase() + (it.category ? ' / ' + clip(it.category, 40) : '') + '] ' +
+        'Problem: ' + (clip(it.problem, 300) || 'not described') + '.' +
+        (it.fix ? ' Fix: ' + clip(it.fix, 300) + '.' : '') +
+        (it.quote ? ' Text in your previous edit: "' + clip(it.quote, 200) + '".' : ''));
+    });
+    head = 'Your previous edit of this exact article was REJECTED by an AI fact check, so nothing was saved. The fact check found these problems:';
+    foot = 'Edit the ORIGINAL article again from the start, fix every one of these problems (when unsure, keep the original wording), and keep following all other instructions exactly.';
+  } else {
+    return '';
+  }
+  if (!lines.length) return '';
+  // Whole lines only, within RETRY_NOTE_MAX.
+  let body = '';
+  const room = RETRY_NOTE_MAX - head.length - foot.length - 2;
+  for (const line of lines) {
+    if ((body + '\n' + line).length > room) break;
+    body += '\n' + line;
+  }
+  if (!body) body = '\n' + lines[0].slice(0, Math.max(0, room - 1));
+  return (head + body + '\n' + foot).slice(0, RETRY_NOTE_MAX);
+}
+
+// Short label for the log line ("Safety Gate: IMG_COUNT, LINK_MISSING" / "fact check: 2 issue(s)").
+function retryNoteLabel(err) {
+  if (err && err.code === 'SAFETY_GATE') {
+    const codes = [];
+    (Array.isArray(err.gateReasons) ? err.gateReasons : []).forEach((r) => {
+      const c = String((r && r.code) || '');
+      if (c && codes.indexOf(c) < 0 && RETRY_NOTE_SKIP_CODES.indexOf(c) < 0) codes.push(c);
+    });
+    return 'Safety Gate: ' + codes.slice(0, 6).join(', ');
+  }
+  if (err && err.code === 'FACT_CHECK') return 'fact check: ' + (Array.isArray(err.factIssues) ? err.factIssues.length : 0) + ' issue(s)';
+  return '';
+}
+
+// Sets this attempt's PRIORITY FIX note for the NEXT try from the previous
+// failure `err`: baseNote (an audit-fix note from the job, if any) + the
+// gate / fact-check reasons. The previous retry's note is always replaced.
+// A recovery read (recoverFromUrl) sends no prompt, so it gets no note.
+function applyRetryFixNote(attemptLinks, baseNote, err, tag) {
+  if (!attemptLinks) return '';
+  const note = attemptLinks.recoverFromUrl ? '' : buildGateRetryNote(err);
+  setRetryFixNote(attemptLinks, baseNote, note);
+  if (note) log('info', (tag ? tag + ' ' : '') + '↻ The retry tells the AI why the previous edit was rejected (' + retryNoteLabel(err) + ') — PRIORITY FIX note attached.');
+  return note;
+}
+
+function setRetryFixNote(attemptLinks, baseNote, note) {
+  const full = [String(baseNote || ''), String(note || '')].filter(Boolean).join('\n\n');
+  if (full) attemptLinks.auditFixNote = full;
+  else delete attemptLinks.auditFixNote;
+}
+
+// End-of-batch retry pass: the note is kept per post (runtime.retryNotes,
+// persisted) from the main pass to the retry pass.
+function rememberRetryNote(rawSlug, err, attemptLinks) {
+  if (!runtime.retryNotes || typeof runtime.retryNotes !== 'object' || Array.isArray(runtime.retryNotes)) runtime.retryNotes = {};
+  const note = (attemptLinks && attemptLinks.recoverFromUrl) ? '' : buildGateRetryNote(err);
+  delete runtime.retryNotes[rawSlug];
+  if (!note) return;
+  runtime.retryNotes[rawSlug] = { note, label: retryNoteLabel(err) };
+  // Bounded (runtime is persisted after every post): the oldest notes go first.
+  const keys = Object.keys(runtime.retryNotes);
+  for (let i = 0; i < keys.length - RETRY_NOTES_MAX_POSTS; i++) delete runtime.retryNotes[keys[i]];
+}
+
+function applyCarriedRetryNote(rawSlug, attemptLinks, baseNote, tag) {
+  const entry = runtime.retryNotes && runtime.retryNotes[rawSlug];
+  const note = (entry && typeof entry === 'object') ? String(entry.note || '').slice(0, RETRY_NOTE_MAX) : '';
+  if (!note || attemptLinks.recoverFromUrl) return '';
+  setRetryFixNote(attemptLinks, baseNote, note);
+  log('info', (tag ? tag + ' ' : '') + '↻ The retry tells the AI why the previous edit was rejected (' + (entry.label || 'Safety Gate') + ') — PRIORITY FIX note attached.');
+  return note;
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // BULK PARALLEL RUN — processes up to 5 posts AT THE SAME TIME.
 // Each slot runs the same self-contained processSlug pipeline with its own
@@ -1380,6 +1568,9 @@ async function runParallelBatch() {
         attemptLinks.auditFixNote = buildAuditFixNote(job.issueMap[rawSlug]);
         log('info', '[' + num + '/' + total + '] Audit-fix mode: sending this post with its previous audit issues attached to the prompt.');
       }
+      // v3.46.0: retries carry the previous attempt's gate / fact-check reasons.
+      const baseFixNote = attemptLinks.auditFixNote || '';
+      if (runtime.retryPass === 1) applyCarriedRetryNote(rawSlug, attemptLinks, baseFixNote, '[' + num + '/' + total + ']');
       const attemptTabs = { edit: null, ai: null };
       const inlineRetries = (job.retryMode || 'end') === 'inline'
         ? job.maxRetries
@@ -1390,6 +1581,7 @@ async function runParallelBatch() {
         if (runtime.stopRequested || missingStop) break;
         if (tryNum > 0) {
           log('warn', '↻ Retry ' + tryNum + '/' + inlineRetries + ' for "' + slug + '" (previous: ' + (lastErr?.message || 'unknown') + ')');
+          applyRetryFixNote(attemptLinks, baseFixNote, lastErr, '[' + num + '/' + total + ']');
           if (attemptTabs.ai)   { await safeCloseTab(attemptTabs.ai);   attemptTabs.ai = null; }
           if (attemptTabs.edit) { await safeCloseTab(attemptTabs.edit); attemptTabs.edit = null; }
           await sleep(3000);
@@ -1421,6 +1613,7 @@ async function runParallelBatch() {
         runtime.failures = runtime.failures.filter(f => f.slug !== slug);
         rememberAttempt(rawSlug, slug, 'updated', attemptLinks.auditReport ? ('Updated on WordPress — ' + attemptLinks.auditReport) : 'Updated on WordPress', attemptLinks);
         log('ok', '✓ [' + num + '/' + total + '] ' + slug);
+        setRetryFixNote(attemptLinks, baseFixNote, '');
         await maybeAuditRetry(rawSlug, slug, num, total, attemptLinks, attemptTabs);
       } else if (recovered) {
         runtime.successes++;
@@ -1440,6 +1633,7 @@ async function runParallelBatch() {
         rememberAttempt(rawSlug, slug, 'failed', errMsg, attemptLinks);
         if ((job.retryMode || 'end') === 'end' && runtime.retryPass === 0 && lastErr?.code !== 'POST_NOT_FOUND' && lastErr?.code !== 'USER_STOPPED') {
           runtime.retryQueue.push(rawSlug);
+          rememberRetryNote(rawSlug, lastErr, attemptLinks);
           log('info', '[' + num + '/' + total + '] Queued "' + slug + '" for the end-of-batch retry pass.');
         }
         if (lastErr?.code === 'POST_NOT_FOUND' && job.onMissing === 'stop') missingStop = true;
@@ -4175,7 +4369,7 @@ async function tryCopyButtonExtract(tabId, originalHtml, promptText, strictMode,
         ? verifyRecoverableHtml(copied, promptText)
         : verifyHtml(copied, originalHtml, promptText, strictMode);
       if (!verify.ok) continue;
-      if (compOpts && !assessHtmlCompleteness(copied, originalHtml, compOpts).complete) continue;
+      if (compOpts && !assessReplyCompleteness(copied, originalHtml, compOpts).complete) continue;
       return copied;
     }
     return '';
@@ -4937,6 +5131,18 @@ function isSafetyBlockCode(code) {
   return code === 'SAFETY_GATE' || code === 'FACT_CHECK' || code === 'FACT_CHECK_ERROR';
 }
 
+// A "Safety Gate prompt": the run prompt asks for the <!-- APU-END --> end
+// marker (the prompts written for the gate do). Decides requireEndMarker, the
+// gate's rule set and the end-marker exception of the completeness check.
+function promptRequiresEndMarker() {
+  return String((runtime.job && runtime.job.prompt) || '').indexOf('APU-END') >= 0;
+}
+
+// Word-retention minimum for prompts that are NOT Safety Gate prompts: old
+// "audit + fix" prompts rewrite more than the gate's own editor prompt (whose
+// minimum is the validator default, 75%).
+const LEGACY_PROMPT_MIN_RETENTION = 0.6;
+
 // The shared validator object (self.SafetyGate from safety-gate.js), or null
 // when the file did not load.
 function safetyGateApi() {
@@ -5155,6 +5361,12 @@ function safetyGateBlockedError(links, codes, messages, warnings, removedLinks) 
     (msgs.length ? ' — ' + msgs.slice(0, 3).join('; ').slice(0, 700) : '') +
     '. The post was NOT changed.');
   err.code = 'SAFETY_GATE';
+  // Code + message pairs for the automatic retry's PRIORITY FIX note.
+  err.gateReasons = (codes || []).slice(0, 30).map((c, i) => ({
+    code: String(c || '').trim() || 'GATE_FAILED',
+    message: safetyMessageText((messages || [])[i]).slice(0, 300)
+  }));
+  if (!err.gateReasons.length) err.gateReasons = codeList.map((c) => ({ code: c, message: '' }));
   if (links) {
     links.gate = {
       codes: codeList,
@@ -5177,14 +5389,24 @@ async function runSafetyGateStep(ctx, referenceHtml, aiHtml, label) {
     log('err', tag + ' 🛡 SAFETY GATE: safety-gate.js not loaded — refusing to save an unchecked edit.');
     throw safetyGateBlockedError(links, ['GATE_NOT_LOADED'], ['safety-gate.js not loaded'], [], []);
   }
+  // Rule set per prompt type (v3.46.0): a Safety Gate prompt (it asks for the
+  // <!-- APU-END --> end marker) gets every rule. Any other prompt (older audit
+  // or affiliate prompts that remove prices or add a "Last updated" line on
+  // purpose) gets the structure rules only: no research rules (Last checked /
+  // freshness / today's date, new or lost prices, percentages and years, new
+  // deep links unwrapped for lack of research) and a lower word-retention
+  // minimum. Images, media, tables, links, shortcodes, blocks, lost text,
+  // chat text and dead / forbidden / internal links are checked either way.
+  const gatePrompt = promptRequiresEndMarker();
   const options = {
     siteDomains: gateSiteDomainsOf(),
     allowNewFaq: runtime.job.gateNewFaq !== 'no',
     webSearchAllowed: runtime.job.promptWebSearch === true,
+    researchRules: gatePrompt,
     checkLinks: runtime.job.gateLinkCheck !== false,
     endMarker: 'APU-END',
     // The prompt asks for the end marker => a reply without it was cut off.
-    requireEndMarker: String(runtime.job.prompt || '').indexOf('APU-END') >= 0,
+    requireEndMarker: gatePrompt,
     fetchFn: gateFetch,
     // v3.46.0: the same local date as [[TODAY]] (today's date added without
     // web research) and the post title (TITLE_IN_BODY) — both checks are off
@@ -5192,10 +5414,16 @@ async function runSafetyGateStep(ctx, referenceHtml, aiHtml, label) {
     today: localDateYmd(),
     postTitle: (links && links.postTitle) || plainPostTitle(ctx && ctx.wpItem && ctx.wpItem.title)
   };
+  // Safety Gate prompts keep the validator's default minimum (75%).
+  if (!gatePrompt) options.minRetention = LEGACY_PROMPT_MIN_RETENTION;
   setStatus(tag + ' 🛡 Safety Gate: checking the ' + what + ' edit');
   log('step', tag + ' 🛡 Safety Gate: checking the ' + what + ' edit (' + String(aiHtml || '').length +
     ' chars) against the original (' + String(referenceHtml || '').length + ' chars)' +
     (options.checkLinks ? ', new-link check ON' : '') + '.');
+  log('info', tag + ' 🛡 Gate rules: ' + (gatePrompt
+    ? 'full rules — Safety Gate prompt.'
+    : 'structure rules — this prompt is not a Safety Gate prompt (no <!-- APU-END --> end marker): prices, dates and "Last updated" lines are not checked by code, word-retention minimum ' +
+      Math.round(LEGACY_PROMPT_MIN_RETENTION * 100) + '%.'));
   let result = null;
   try {
     result = await api.runSafetyGate(referenceHtml, aiHtml, options);
@@ -5479,6 +5707,8 @@ function factCheckBlockedError(fc, afterFixRound, extraReason) {
   if (extraReason) msg += '. ' + safetyMessageText(extraReason).replace(/[.\s]+$/, '');
   const err = manualReviewError(safetyMessageText(msg).replace(/[.\s]+$/, '') + '. The post was NOT changed.');
   err.code = 'FACT_CHECK';
+  // The blocking issues, for the automatic retry's PRIORITY FIX note.
+  err.factIssues = compactFactIssues(issues);
   return err;
 }
 
@@ -6125,7 +6355,7 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
     }
     const recComp = completenessOptions();
     if (recComp && !allowAnyCode && !requireSections) {
-      const recAssess = assessHtmlCompleteness(recHtml, originalHtml, recComp);
+      const recAssess = assessReplyCompleteness(recHtml, originalHtml, recComp);
       if (!recAssess.complete) throw manualReviewError('Recovered HTML looked incomplete (' + recAssess.reasons.join('; ') + ').');
     }
     log(allowAnyCode ? 'warn' : 'ok', tag + ' Recovered ' + recHtml.length + ' chars of HTML from the existing AI session' + (allowAnyCode ? ' and accepted it through the manual ANY CODE override.' : '.'));
@@ -6173,7 +6403,7 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
     }
     const apiComp = completenessOptions();
     const apiAssess = apiComp
-      ? assessHtmlCompleteness(aiHtml, originalHtml, apiComp)
+      ? assessReplyCompleteness(aiHtml, originalHtml, apiComp)
       : { complete: true, coverage: (originalHtml.length ? aiHtml.length / originalHtml.length : 1), reasons: [] };
     if (!apiAssess.complete) {
       throw new Error('AI API result looks incomplete and was NOT saved (' + apiAssess.reasons.join('; ') + '). Raise max tokens, reduce the article size, or set the completeness check to Off if this is a false alarm.');
@@ -6254,9 +6484,12 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
     }
     const scbComp = completenessOptions();  // honor the user's "Article completeness check" setting (null = Off)
     if (scbComp) {
-      const scbAssess = assessHtmlCompleteness(aiHtml, originalHtml, scbComp);
+      const scbAssess = assessReplyCompleteness(aiHtml, originalHtml, scbComp);
       if (!scbAssess.complete) {
         throw manualReviewError('Refused to save — the HTML code box looked incomplete (' + scbAssess.reasons.join('; ') + '). The post was NOT changed. Turn on Fix-it prompts or use API mode for big articles; or set completeness to Off to save it anyway.');
+      }
+      if (scbAssess.coverageWaived) {
+        log('info', tag + ' Completeness: the edit is ' + Math.round((scbAssess.coverage || 0) * 100) + '% of the source length — accepted because it carries the <!-- APU-END --> end marker (the Safety Gate checks for lost words).');
       }
     }
     attemptLinks.aiSessionUrl = await refreshAISessionUrl(aiTab.id, attemptLinks.aiSessionUrl, providerKind, runtime.job.aiUrl);
@@ -6763,7 +6996,7 @@ async function waitForAIResponse(tabId, timeoutMs, num, total, originalHtml, pro
       const compOpts = allowAnyCode ? null : completenessOptions();
       if (settledShort || settledLong) {
         const comp = compOpts
-          ? assessHtmlCompleteness(candidate.text, originalHtml, compOpts)
+          ? assessReplyCompleteness(candidate.text, originalHtml, compOpts)
           : { complete: true, coverage: (originalHtml.length ? candidate.text.length / originalHtml.length : 1), reasons: [] };
         if (comp.complete) {
           const finalText = await preferCopyIfLonger(candidate, snapshot?.hasCodeCard === true, comp.coverage);
@@ -6789,7 +7022,7 @@ async function waitForAIResponse(tabId, timeoutMs, num, total, originalHtml, pro
               const rcVerify = allowAnyCode
                 ? verifyRecoverableHtml(rawCopy, promptText)
                 : verifyHtml(rawCopy, originalHtml, promptText, strictMode);
-              const rcComp = compOpts ? assessHtmlCompleteness(rawCopy, originalHtml, compOpts) : { complete: true };
+              const rcComp = compOpts ? assessReplyCompleteness(rawCopy, originalHtml, compOpts) : { complete: true };
               if (rcVerify.ok && rcComp.complete) {
                 log('ok', '[' + num + '/' + total + '] Full article recovered via the code Copy button (' + rawCopy.length + ' chars).');
                 return rawCopy;
@@ -7081,7 +7314,7 @@ async function completeByContinuation(tabId, providerKind, firstPart, originalHt
     // If the model ignored "remaining only" and re-sent the WHOLE article,
     // the new reply may already be complete by itself — prefer it.
     const aloneVerify = verifyHtml(part, originalHtml, promptText, strictMode);
-    const aloneComp = compOpts ? assessHtmlCompleteness(part, originalHtml, compOpts) : { complete: true };
+    const aloneComp = compOpts ? assessReplyCompleteness(part, originalHtml, compOpts) : { complete: true };
     if (aloneVerify.ok && aloneComp.complete && part.length > assembled.length * 0.9) {
       return part;
     }
@@ -7090,7 +7323,7 @@ async function completeByContinuation(tabId, providerKind, firstPart, originalHt
     log('info', '[' + num + '/' + total + '] Continuation round ' + round + ' added ' + (assembled.length - before) + ' chars (total ' + assembled.length + ').');
     if (assembled.length <= before + 30) return '';
     const verify = verifyHtml(assembled, originalHtml, promptText, strictMode);
-    const comp = compOpts ? assessHtmlCompleteness(assembled, originalHtml, compOpts) : { complete: true };
+    const comp = compOpts ? assessReplyCompleteness(assembled, originalHtml, compOpts) : { complete: true };
     if (verify.ok && comp.complete) return assembled;
   }
   return '';
@@ -7712,6 +7945,25 @@ function assessHtmlCompleteness(html, originalHtml, options) {
     }
   }
   return { complete: reasons.length === 0, coverage, reasons };
+}
+
+// v3.46.0: the completeness check for a FINAL reply (every place that
+// accepts or rejects one: waitForAIResponse, the copy-button paths, the
+// continuation stitcher, recovery, API mode and the final web check). With
+// the Safety Gate on, a Safety Gate prompt (it asks for <!-- APU-END -->) and
+// the marker in the extracted HTML, the reply was not cut off, so it is NOT
+// rejected for the character-coverage signal alone: cleaning up messy markup
+// (Word / Google Docs <span style> clutter) can legitimately shrink the HTML
+// by more than 15%. Every other completeness signal stays, and the gate's
+// own word-based CONTENT_LOSS / CONTENT_RETENTION still judge lost text.
+// result.coverageWaived = true when the coverage alone would have failed.
+function assessReplyCompleteness(html, originalHtml, options) {
+  const markerOk = safetyGateOn() && promptRequiresEndMarker() && /<!--\s*APU-END\s*-->/i.test(String(html || ''));
+  if (!markerOk) return assessHtmlCompleteness(html, originalHtml, options);
+  const res = assessHtmlCompleteness(html, originalHtml, Object.assign({}, options || {}, { minCoverage: 0 }));
+  const minCoverage = (options && typeof options.minCoverage === 'number') ? options.minCoverage : 0.85;
+  res.coverageWaived = String(originalHtml || '').length > 0 && res.coverage < minCoverage;
+  return res;
 }
 
 // POST-SAVE AUDIT (report-only, no AI) — runs only on successfully saved posts.

@@ -99,12 +99,13 @@ function heading(id, text, level) {
 }
 function para(text) { return b('paragraph', '<p>' + text + '</p>'); }
 
-// opts: { edited, dropImage2, whyExtra, cleanExtra }
+// opts: { edited, dropImage2, whyExtra, cleanExtra, seasonExtra, afterIntro, spans }
 function article(opts) {
   const o = opts || {};
   const e = !!o.edited;
   const parts = [
     para(e ? T.introEdited : T.intro),
+    o.afterIntro || null,
     heading('why-cast-iron-needs-care', 'Why Cast Iron Needs Care'),
     para((e ? T.whyEdited : T.why) + (o.whyExtra || '')),
     IMG1,
@@ -117,7 +118,7 @@ function article(opts) {
       li('Rub in a few drops of oil with a paper towel while the pan is still warm.')
     ].join('\n') + '</ol>', '{"ordered":true}'),
     heading('seasoning-oils', 'Seasoning Oils Compared'),
-    para(e ? T.seasonEdited : T.season),
+    para((e ? T.seasonEdited : T.season) + (o.seasonExtra || '')),
     b('table', '<figure class="wp-block-table"><table><thead><tr><th>Oil</th><th>Smoke point</th><th>Best for</th></tr></thead><tbody>' +
       '<tr><td>Flaxseed oil</td><td>107°C</td><td>Thin oven coats</td></tr>' +
       '<tr><td>Vegetable shortening</td><td>182°C</td><td>Everyday re-seasoning</td></tr>' +
@@ -139,11 +140,38 @@ function article(opts) {
     heading('conclusion', 'Conclusion'),
     para(e ? T.conclusionEdited : T.conclusion)
   ];
-  return parts.filter(Boolean).join('\n\n');
+  const html = parts.filter(Boolean).join('\n\n');
+  // Word / Google Docs clutter: every paragraph and list item wrapped in a
+  // styled <span> (S19's original; the edit cleans it up).
+  return o.spans ? html.replace(/<(p|li)>([\s\S]*?)<\/\1>/g, (m, tag, inner) => '<' + tag + '><span style="' + SPAN_STYLE + '">' + inner + '</span></' + tag + '>') : html;
 }
+const SPAN_STYLE = 'font-weight: 400; font-family: Arial, sans-serif; color: #000000; background-color: transparent;';
 
 const ORIGINAL_HTML = article({ edited: false });
 const GOOD_EDIT = article({ edited: true });
+
+// S16 / S17: an affiliate-style LEGACY prompt (no <!-- APU-END -->, web search
+// off). The original names a price; the edit removes it on purpose, adds a
+// "Last updated" line with today's date and a new deep link to a live page.
+const PRICE_SENTENCE = ' A pre-seasoned 10-inch skillet costs about $25 at most kitchen shops.';
+const PRICE_SENTENCE_EDITED = ' A pre-seasoned 10-inch skillet is sold at most kitchen shops for little money.';
+function todayYmd() {
+  const t = new Date();
+  return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+}
+const LEGACY_ORIGINAL = article({ seasonExtra: PRICE_SENTENCE });
+// opts: { dropImage2 }
+function legacyEdit(opts) {
+  return article({
+    edited: true,
+    seasonExtra: PRICE_SENTENCE_EDITED,
+    afterIntro: para('<em>Last updated: ' + todayYmd() + '</em>'),
+    whyExtra: LIVE_LINK_SENTENCE,
+    dropImage2: !!(opts && opts.dropImage2)
+  });
+}
+// S19: the original is full of <span style> clutter; the edit removes it.
+const SPANS_ORIGINAL = article({ spans: true });
 
 // ── Scenario catalogue: what the fake AI replies ───────────────────────────
 // editor(ctx) / factCheck(ctx) return the reply as markdown text. ctx has
@@ -168,6 +196,20 @@ function legacyReply(html) {
     'AUDIT SUMMARY',
     'Readability: good. Structure: good. Three sentences were tightened.',
     'FIXED ARTICLE',
+    '```html',
+    html,
+    '```'
+  ].join('\n');
+}
+function amazonReply(html) {
+  // The built-in "Single Amazon Product" prompt: an update log, then the
+  // revised HTML in one code block, without any end marker.
+  return [
+    '[TITLE] Extracted: "How to Care for Cast Iron" from H1 | [PRODUCT] Extracted: "cast iron skillet"',
+    '[CHANGE] Intro: tightened the hook.',
+    '[CHANGE] Seasoning Oils: removed the specific price claim (prices change).',
+    '[E-E-A-T] Last updated line added.',
+    'PART 2 \u2014 REVISED HTML',
     '```html',
     html,
     '```'
@@ -265,6 +307,34 @@ const SCENARIOS = {
     editor: () => editorReply(article({ edited: true, whyExtra: DEAD_LINK_SENTENCE })),
     factCheck: () => jsonReply({ verdict: 'pass', issues: [{ severity: 'low', category: 'style', quote: 'Clean the pan while it is still warm, because food lifts off more easily', problem: 'Slightly long sentence.', fix: 'Optional: split it.' }] })
   }
+};
+
+// S16 / S17: legacy affiliate prompt (see legacyEdit).
+SCENARIOS.S16 = {
+  title: 'legacy prompt: price removed, Last updated, new link',
+  editor: () => amazonReply(legacyEdit()),
+  factCheck: () => jsonReply(PASS)
+};
+SCENARIOS.S17 = {
+  title: 'legacy prompt: AI drops an image',
+  editor: () => amazonReply(legacyEdit({ dropImage2: true })),
+  factCheck: () => jsonReply(PASS)
+};
+// S18: the first reply drops an image; the automatic retry must carry a
+// PRIORITY FIX block that names IMG_COUNT — only then the good edit comes.
+SCENARIOS.S18 = {
+  title: 'automatic retry carries the gate reasons',
+  editor: (ctx) => (hasPriorityFixBlock(ctx.payload) && /IMG_COUNT/.test(ctx.payload))
+    ? editorReply(GOOD_EDIT)
+    : editorReply(article({ edited: true, dropImage2: true })),
+  factCheck: () => jsonReply(PASS)
+};
+// S19: the edit strips the <span style> clutter (about 75% of the source
+// length) and ends with the marker.
+SCENARIOS.S19 = {
+  title: 'span clean-up shrinks HTML, marker present',
+  editor: () => editorReply(GOOD_EDIT),
+  factCheck: () => jsonReply(PASS)
 };
 
 // Update mode "editor" (wp-admin Classic Editor instead of the REST API):
@@ -782,8 +852,8 @@ async function startServer(opts) {
 }
 
 module.exports = {
-  startServer, SCENARIOS, classifyPayload, hasPriorityFixBlock, article,
-  ORIGINAL_HTML, GOOD_EDIT, BAD_CLAIM, LIVE_LINK, DEAD_LINK, END,
+  startServer, SCENARIOS, classifyPayload, hasPriorityFixBlock, article, legacyEdit, todayYmd,
+  ORIGINAL_HTML, GOOD_EDIT, BAD_CLAIM, LIVE_LINK, DEAD_LINK, END, LEGACY_ORIGINAL, SPANS_ORIGINAL, PRICE_SENTENCE,
   WP_HOST, LINK_HOST, WP_USER, WP_APP_PASSWORD
 };
 

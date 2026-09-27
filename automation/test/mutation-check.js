@@ -50,7 +50,11 @@ const MUTANTS = [
   ['webSearchAllowed ignored', 'if (o.webSearchAllowed === false ||', 'if (false && o.webSearchAllowed === false ||'],
   ['classic conversion on partial comments', 'const classicConversion = O.tokens.length > 0 && E.tokens.length === 0;', 'const classicConversion = O.tokens.length > 0;'],
   ['gate ok despite errors', 'if (v.pass && !out.errors.length) {', 'if (true) {'],
-  ['gate ignores its own errors', 'if (v.pass && !out.errors.length) {', 'if (v.pass) {']
+  ['gate ignores its own errors', 'if (v.pass && !out.errors.length) {', 'if (v.pass) {'],
+  ['researchRules ignored by the no-research checks', 'if (opts.webSearchCount === 0 && opts.researchRules !== false) {', 'if (opts.webSearchCount === 0) {'],
+  ['researchRules off by default', 'let researchRules = true;', 'let researchRules = false;'],
+  ['researchRules ignored by the deep-link rule', "if (opts.webSearchCount === 0 && opts.researchRules !== false && !isBareHomepage(p))", "if (opts.webSearchCount === 0 && !isBareHomepage(p))"],
+  ['no-research deep links kept', "if (opts.webSearchCount === 0 && opts.researchRules !== false && !isBareHomepage(p)) return 'deep_link_without_research';", '']
 ];
 
 function main() {

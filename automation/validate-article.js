@@ -31,7 +31,7 @@
  * Fail-closed rule: anything unexpected => action "keep_original" (the live article is not touched).
  */
 
-const VALIDATE_ARTICLE_VERSION = '1.2.0';
+const VALIDATE_ARTICLE_VERSION = '1.3.0';
 
 const MARKER_HTML = '<<<ARTICLE_HTML>>>';
 const MARKER_META = '<<<META_JSON>>>';
@@ -171,7 +171,7 @@ const LLM_CHATTER_ANY_RE = /\blet me know if you(?:'d|\u2019d| would)? (?:like|w
 // FAQ section headings in the user's languages (a FAQ counts as present when a heading matches).
 const FAQ_HEADING_RE = /\bfaqs?\b|frequently asked|common questions|questions? (?:and|&) answers?|\bq ?& ?a\b|h\u00e4ufig gestellte fragen|h\u00e4ufige fragen|preguntas frecuentes|questions fr\u00e9quentes|foire aux questions|domande frequenti|perguntas frequentes|veelgestelde vragen|vanliga fr\u00e5gor|ofte stillede sp\u00f8rgsm\u00e5l|ofte stilte sp\u00f8rsm\u00e5l|usein kysyt|najcz\u0119\u015bciej zadawane pytania|cz\u0119sto zadawane pytania|s\u0131k\u00e7a sorulan sorular|\u0447\u0430\u0441\u0442\u043e \u0437\u0430\u0434\u0430\u0432\u0430\u0435\u043c\u044b\u0435 \u0432\u043e\u043f\u0440\u043e\u0441\u044b|\u09b8\u09be\u09a7\u09be\u09b0\u09a3 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8|\u09aa\u09cd\u09b0\u09be\u09af\u09bc\u09b6\u0987 \u099c\u09bf\u099c\u09cd\u099e\u09be\u09b8\u09bf\u09a4|\u09b8\u099a\u09b0\u09be\u099a\u09b0 \u099c\u09bf\u099c\u09cd\u099e\u09be\u09b8\u09bf\u09a4|\u0905\u0915\u094d\u0938\u0930 \u092a\u0942\u091b\u0947 \u091c\u093e\u0928\u0947 \u0935\u093e\u0932\u0947/i;
 
-// Freshness / verification claims that need research (webSearchCount 0 => hard error when new).
+// Freshness / verification claims that need research (webSearchCount 0 => hard error when new, unless researchRules is false).
 // A date-like span right after the claim word ("Updated: September 2026", "updated for 2026", "reviewed 27.09.2026");
 // "the rules were updated in 2023" (a fact, after was/were/been) is not a freshness claim.
 const FRESHNESS_PATTERNS = [
@@ -696,6 +696,11 @@ function normalizeOptions(options) {
   // Browser mode knows only whether the prompt allowed web search: false = no research (same as 0 searches,
   // and it wins over a search count); true = unknown / some research (the search count, if any, is kept).
   if (o.webSearchAllowed === false || (typeof o.webSearchAllowed === 'string' && /^\s*(no|false|off|0)\s*$/i.test(o.webSearchAllowed))) wsc = 0;
+  // researchRules false (browser mode, a prompt that was not written for the Safety Gate): the no-research rules
+  // (Last checked / freshness / today's date, new or lost prices, percentages and years, deep links unwrapped for
+  // lack of research) are skipped. Every other check stays. Default true.
+  let researchRules = true;
+  if (o.researchRules === false || (typeof o.researchRules === 'string' && /^\s*(no|false|off|0)\s*$/i.test(o.researchRules))) researchRules = false;
   let allowNewFaq = true;
   if (o.allowNewFaq === false || (typeof o.allowNewFaq === 'string' && /^\s*(no|false|off|0)\s*$/i.test(o.allowNewFaq))) allowNewFaq = false;
   let lastCheckedLine = 'auto';
@@ -707,6 +712,7 @@ function normalizeOptions(options) {
     siteDomains: siteDomains,
     siteDomainsInferred: false,
     webSearchCount: wsc,
+    researchRules: researchRules,
     allowNewFaq: allowNewFaq,
     lastCheckedLine: lastCheckedLine,
     today: todayM ? todayM[1] + '-' + todayM[2] + '-' + todayM[3] : '',
@@ -772,7 +778,7 @@ function decideNewLink(href, opts, deadSet) {
   if (hostMatches(p.host, opts.forbiddenLinkDomains)) return 'forbidden_domain';
   if (hostMatches(p.host, REDIRECT_LINK_DOMAINS) || SEARCH_REDIRECT_RE.test(h)) return 'redirect';
   if (deadSet && deadSet.has(h)) return typeof deadSet.get === 'function' ? (deadSet.get(h) || 'dead') : 'dead';
-  if (opts.webSearchCount === 0 && !isBareHomepage(p)) return 'deep_link_without_research';
+  if (opts.webSearchCount === 0 && opts.researchRules !== false && !isBareHomepage(p)) return 'deep_link_without_research';
   return null;
 }
 
@@ -2315,7 +2321,7 @@ function validateArticle(originalHtml, editedHtml, options) {
   const lcO = multiset(lastCheckedSnippets(O.text));
   const lcE = multiset(lastCheckedSnippets(E.text));
   const lcNew = multisetExcess(lcO, lcE);
-  if (opts.webSearchCount === 0) {
+  if (opts.webSearchCount === 0 && opts.researchRules !== false) {
     for (const entry of lcNew) {
       error('LAST_CHECKED_WITHOUT_RESEARCH', 'A new or changed "Last checked" line was added without any web research: "' + short(entry[0], 60) + '"');
     }
@@ -2767,7 +2773,7 @@ async function processEditorOutput(originalHtml, llmText, options) {
 /**
  * One call for the browser extension's Safety Gate: strip end markers -> find new links -> check them
  * (options.checkLinks, options.fetchFn) -> sanitize links -> validateArticle. Never throws.
- * options: the validateArticle/processEditorOutput options, plus webSearchAllowed, endMarker, requireEndMarker.
+ * options: the validateArticle/processEditorOutput options, plus webSearchAllowed, researchRules, endMarker, requireEndMarker.
  * ok = true only when nothing failed; html is then the sanitized, marker-free HTML to save. When ok is false,
  * nothing may be saved: html is the (marker-free) reference and candidateHtml the rejected edit.
  */

@@ -82,7 +82,7 @@ The audit prompt has two SETTINGS lines: `Today's date (YYYY-MM-DD):` and `Web s
 
 ### The research count (`webSearchCount` / `--searches`)
 
-The validator only asks: did the editor really open and read at least one web page? `0` means no research. Then it removes every new deep link and blocks new "Last checked" lines, "updated/verified" wording, today's date, and new prices, percentages or years. Search results alone do not count, because the prompt says snippets never verify anything. One rule:
+The validator only asks: did the editor really open and read at least one web page? `0` means no research. Then it removes every new deep link and blocks new "Last checked" lines, "updated/verified" wording, today's date, and new prices, percentages or years. Search results alone do not count, because the prompt says snippets never verify anything. (The option `researchRules: false` switches these no-research rules off; this pipeline never needs it, see section 6.) One rule:
 
 - **Claude with `callClaude`:** pass `edit.pagesOpened` (pages opened without an error), and `edit.openedUrls` as `verifiedUrls`. If searches ran but no page opened, this is `0`, and that is correct.
 - **Tool off, or you are not sure a page was opened:** pass `0`.
@@ -281,7 +281,7 @@ add_action( 'init', function () {
   - After the POST, read the meta again. If the values are not there, log `meta_not_saved`. The article itself is fine.
 
 ```js
-// V = require('./automation/validate-article.js'); visibleText is an internal helper of version 1.2.0
+// V = require('./automation/validate-article.js'); visibleText is an internal helper (version 1.2.0 and later)
 function safeSeoText(text, finalHtml) {
   const t = String(text || '').replace(/\s+/g, ' ').trim();
   if (!t || /[<>{}\[\]]|\bTODO\b|\bTBD\b/.test(t)) return '';
@@ -427,10 +427,11 @@ Options for `processEditorOutput` (and `validateArticle`):
 | `checkLinks` | `true` | `false` = do not open new links. **Tests only** (dead and unchecked deep links then stay in) |
 | `fetchFn` | global `fetch` | your own fetch function (below) |
 | `webSearchAllowed` | – | browser mode, instead of `webSearchCount`: `false` = no research (same as `0`, and it wins over a count), `true` = unknown or some research |
+| `researchRules` | `true` | `false` switches off only the no-research rules: with research count `0` a new or changed "Last checked" line, an "updated"/"verified" claim or today's date (`LAST_CHECKED_WITHOUT_RESEARCH`), new or lost prices, percentages and years (`NEW_NUMBER_WITHOUT_RESEARCH`, `NUMBER_MISSING`) are then allowed, and a new deep link is no longer removed just because there was no research (it is still link-checked; dead, unverified, forbidden, internal and non-http links are still removed). Every other check stays. The browser extension sets it to `false` for prompts that were not written for the Safety Gate (no `APU-END` end marker). Leave it at `true` in this pipeline |
 | `endMarker` / `requireEndMarker` | `''` / `false` | e.g. `'APU-END'`: `<!-- APU-END -->` comments are removed before the comparison; with `requireEndMarker: true` an edit without one is `END_MARKER_MISSING` (cut off) |
 | `linkTimeoutMs` / `linkConcurrency` | `10000` / `4` | link check timeout and parallel requests |
 | `forbiddenLinkDomains` | the default list | replaces the default list; to add sites, use `V.DEFAULT_FORBIDDEN_LINK_DOMAINS.concat(['somecouponsite.com'])`. Short-link and redirect hosts (`REDIRECT_LINK_DOMAINS`) are always removed anyway |
-| `minWordRatio` / `maxWordRatio` / `minRetention` | `0.8` / `5` / `0.75` | limits for `CONTENT_LOSS`, `WORD_RATIO_EXTREME` and `CONTENT_RETENTION` |
+| `minWordRatio` / `maxWordRatio` / `minRetention` | `0.8` / `5` / `0.75` | limits for `CONTENT_LOSS`, `WORD_RATIO_EXTREME` and `CONTENT_RETENTION` (the extension passes `minRetention: 0.6` for prompts that are not Safety Gate prompts) |
 
 The result has: `action` (`publish`, `keep_original`, `skip`), `html` (the cleaned edit on publish, else the original), `changed` (false = nothing to write), `candidateHtml`, `meta`, `errors`, `warnings`, `removedLinks` (`{url, reason}`), `changedLinks` (links with tracking parts cut), `linkResults`, `stats` (including `wordRetention`).
 `filterAuditIssues` returns the audit with `verdict`, `effectiveVerdict`, `issues` (kept), `dropped` (quote not in the article), `retryIssues`, `blocking` (true unless `effectiveVerdict` is `pass`) and `valid` (false = not JSON).
@@ -526,7 +527,7 @@ Warning codes: `AI_PHRASE`, `WORD_RATIO_HIGH`, `BOX_LIMIT`, `FAQ_SCHEMA_MISMATCH
 
 - `article-editor-prompt.txt`: the editor prompt (automation edition of Prompt 2). Fill its 9 SETTINGS lines and `<article_html>`.
 - `fact-audit-prompt.txt`: the second-AI fact check. Fill its 2 SETTINGS lines, `<original_html>` and `<edited_html>`.
-- `validate-article.js`: all code checks (parse, link check, link cleaning, validate, audit filter). Command line or `require()` or paste. Version 1.2.0. The browser extension uses a byte-identical copy (`extension/safety-gate.js`).
+- `validate-article.js`: all code checks (parse, link check, link cleaning, validate, audit filter). Command line or `require()` or paste. Version 1.3.0 (1.3.0 added the `researchRules` option). The browser extension uses a byte-identical copy (`extension/safety-gate.js`).
 - `test/run-tests.test.js`: tests for every error and warning code (`node --test automation/test/`).
 - `test/mutation-check.js`: checks that the tests notice when a safety rule is weakened (`node automation/test/mutation-check.js --run`).
 - `test/package.json`: lets `node --test automation/test/` work on Node 22 and newer.

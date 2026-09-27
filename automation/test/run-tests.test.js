@@ -1439,7 +1439,7 @@ test('no false fails from the new text rules: normal sentences that look a bit l
 
 // ---------------------------------------------------------------------------------------------
 // browser extension Safety Gate (v1.2.0): end marker, tables/lists, classic conversion,
-// webSearchAllowed, runSafetyGate, self.SafetyGate
+// webSearchAllowed, researchRules (v1.3.0), runSafetyGate, self.SafetyGate
 // ---------------------------------------------------------------------------------------------
 const GATE = { siteDomains: ['tubetyre.com'], endMarker: 'APU-END', requireEndMarker: true };
 const END = '<!-- APU-END -->';
@@ -1554,6 +1554,100 @@ test('webSearchAllowed: false = no research (like webSearchCount 0, and it wins)
   assert.ok(s.html.includes('deep, <a href="https://www.who.int/">home</a>.'));
   assert.deepEqual(s.removed.map((x) => x.reason), ['deep_link_without_research']);
   assert.equal(V.sanitizeLinks(S_ORIG, e, { webSearchAllowed: true }).removed.length, 0);
+});
+
+test('researchRules false (a prompt not written for the Safety Gate): the no-research rules are off, every other rule stays', async () => {
+  const n = V._internal.normalizeOptions;
+  assert.equal(n({}).researchRules, true);
+  assert.equal(n({ researchRules: true }).researchRules, true);
+  assert.equal(n({ researchRules: 'yes' }).researchRules, true);
+  assert.equal(n({ researchRules: false }).researchRules, false);
+  assert.equal(n({ researchRules: 'off' }).researchRules, false);
+  // the web-search setting itself is unchanged by it
+  assert.equal(n({ webSearchAllowed: false, researchRules: false }).webSearchCount, 0);
+  const NO = { webSearchAllowed: false, today: '2026-09-27' };
+  const LEGACY = Object.assign({}, NO, { researchRules: false });
+  // "Last updated" line with today's date and an "updated"/"verified" claim
+  const line = para('<em>Last updated: 2026-09-27. Prices were verified against the maker\'s shop.</em>');
+  const dated = replaceOnce(GOOD, QA_BOX_START, line + '\n\n' + QA_BOX_START);
+  expectError(validate(dated, NO), 'LAST_CHECKED_WITHOUT_RESEARCH');
+  expectError(validate(dated, Object.assign({}, LEGACY, { researchRules: true })), 'LAST_CHECKED_WITHOUT_RESEARCH');
+  assert.deepEqual(validate(dated, LEGACY).errors, []);
+  // prices, percentages and years: added, changed and removed
+  const OC = { siteDomains: ['getcostidea.com'], webSearchAllowed: false };
+  const OC_LEGACY = Object.assign({}, OC, { researchRules: false });
+  const changed = replaceAll(GOOD_C, '$800', '$950');
+  const r0 = V.validateArticle(ORIG_C, changed, OC);
+  expectError(r0, 'NEW_NUMBER_WITHOUT_RESEARCH');
+  expectError(r0, 'NUMBER_MISSING');
+  assert.deepEqual(V.validateArticle(ORIG_C, changed, OC_LEGACY).errors, []);
+  const noPrice = replaceAll(GOOD_C, 'before 1978', 'long ago');
+  expectError(V.validateArticle(ORIG_C, noPrice, OC), 'NUMBER_MISSING');
+  assert.deepEqual(V.validateArticle(ORIG_C, noPrice, OC_LEGACY).errors, []);
+  const priced = insertBeforeSnippet(GOOD, para('A digital gauge costs about $25 in 2026 and lasts 20% longer if you store it well.'));
+  expectError(validate(priced, NO), 'NEW_NUMBER_WITHOUT_RESEARCH');
+  assert.deepEqual(validate(priced, LEGACY).errors, []);
+  // new links: a deep link is no longer unwrapped just for lack of research; bad links still are
+  const e = sEdited('<a href="https://www.who.int/news/item/1">deep</a>, <a href="https://www.who.int/">home</a>, ' +
+    '<a href="https://www.pinterest.com/pin/1/">pin</a>, <a href="https://tubetyre.com/new-page/">internal</a>, ' +
+    '<a href="javascript:alert(1)">script</a>, <a href="https://bit.ly/abc">short</a>, <a href="https://www.who.int/gone">gone</a>.');
+  const sOn = V.sanitizeLinks(S_ORIG, e, { siteDomains: ['tubetyre.com'], webSearchAllowed: false }, ['https://www.who.int/gone']);
+  assert.deepEqual(sOn.removed.map((x) => x.reason).sort(),
+    ['dead', 'deep_link_without_research', 'forbidden_domain', 'internal', 'javascript', 'redirect']);
+  const sOff = V.sanitizeLinks(S_ORIG, e, { siteDomains: ['tubetyre.com'], webSearchAllowed: false, researchRules: false }, ['https://www.who.int/gone']);
+  assert.deepEqual(sOff.removed.map((x) => x.reason).sort(), ['dead', 'forbidden_domain', 'internal', 'javascript', 'redirect']);
+  assert.ok(sOff.html.includes('<a href="https://www.who.int/news/item/1">deep</a>, <a href="https://www.who.int/">home</a>, pin, internal, script, short, gone.'));
+  // validateArticle (defence in depth) agrees: a new deep link is a BAD_NEW_LINK only with the rules on
+  const withDeep = insertBeforeSnippet(GOOD, para('See <a href="https://www.who.int/news/item/1">the WHO note</a> for more.'));
+  expectError(validate(withDeep, NO), 'BAD_NEW_LINK');
+  assert.deepEqual(validate(withDeep, LEGACY).errors, []);
+  expectError(validate(insertBeforeSnippet(GOOD, para('See <a href="https://tubetyre.com/new-page/">our page</a>.')), LEGACY), 'NEW_INTERNAL_LINK');
+  expectError(validate(insertBeforeSnippet(GOOD, para('See <a href="https://www.reddit.com/r/cars/">the forum</a>.')), LEGACY), 'BAD_NEW_LINK');
+  // structure rules are untouched
+  expectError(validate(replaceOnce(dated, '<img', '<span'), LEGACY), 'IMG_COUNT');
+  expectError(validate(replaceAll(dated, 'https://www.nhtsa.gov/equipment/tires', 'https://www.nhtsa.gov/equipment/tyres'), LEGACY), 'LINK_MISSING');
+});
+
+test('runSafetyGate with researchRules false: the new deep link is link-checked (alive = kept, dead / unverified = unwrapped); minRetention can be lowered', async () => {
+  const LEG = { siteDomains: ['tubetyre.com'], allowNewFaq: true, webSearchAllowed: false, researchRules: false, checkLinks: true,
+    endMarker: 'APU-END', requireEndMarker: false, today: '2026-09-27' };
+  const DEEP = 'https://www.who.int/news/item/tyres';
+  const edit = insertBeforeSnippet(replaceOnce(GOOD, QA_BOX_START, para('<em>Last updated: 2026-09-27</em>') + '\n\n' + QA_BOX_START),
+    para('A digital gauge costs about $25. See <a href="' + DEEP + '">the WHO note</a> for more.'));
+  const calls = [];
+  let r = await V.runSafetyGate(ORIG, edit, Object.assign({}, LEG, { fetchFn: makeFetch({}, calls) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.ok(r.html.includes('<a href="' + DEEP + '">the WHO note</a>'));
+  assert.deepEqual(r.removedLinks, []);
+  assert.ok(calls.some((c) => c[1] === DEEP), 'the deep link was really checked');
+  r = await V.runSafetyGate(ORIG, edit, Object.assign({}, LEG, { fetchFn: makeFetch({ [DEEP]: () => ({ status: 404 }) }) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['dead']);
+  assert.ok(r.html.includes('See the WHO note for more.'));
+  r = await V.runSafetyGate(ORIG, edit, Object.assign({}, LEG, { fetchFn: makeFetch({ [DEEP]: () => ({ status: 403 }) }) }));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['unverified']);
+  // the default (full rules) blocks the same edit and unwraps the deep link without checking it
+  const calls2 = [];
+  r = await V.runSafetyGate(ORIG, edit, Object.assign({}, LEG, { researchRules: true, fetchFn: makeFetch({}, calls2) }));
+  expectError(r, 'LAST_CHECKED_WITHOUT_RESEARCH');
+  expectError(r, 'NEW_NUMBER_WITHOUT_RESEARCH');
+  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['deep_link_without_research']);
+  assert.ok(!calls2.some((c) => c[1] === DEEP));
+  // a lost image still blocks
+  r = await V.runSafetyGate(ORIG, replaceOnce(edit, '<img', '<span'), Object.assign({}, LEG, NOFETCH));
+  expectError(r, 'IMG_COUNT');
+  // minRetention: the caller's value replaces the default 0.75 (lower = more rewriting allowed)
+  let h = dropSection(GOOD, 'What Are the Most Common Mistakes?');
+  h = dropSection(h, 'Where Do You Find the Right Tyre Pressure?');
+  h = insertBeforeSnippet(h, para('Our guide on <a href="https://tubetyre.com/tyre-sidewall-markings/">sidewall markings</a> helps. ' + uniqueWords(160, 'pad')));
+  const ret = validate(h).stats.wordRetention;
+  assert.ok(ret < 0.75 && ret > 0.3, 'retention ' + ret);
+  expectError(validate(h, { minRetention: 0.75 }), 'CONTENT_RETENTION');
+  assert.ok(!codes(validate(h, { minRetention: Math.floor(ret * 100) / 100 - 0.01 }).errors).includes('CONTENT_RETENTION'));
+  assert.equal(V._internal.normalizeOptions({}).minRetention, 0.75);
+  assert.equal(V._internal.normalizeOptions({ minRetention: 0.6 }).minRetention, 0.6);
+  assert.equal(V._internal.normalizeOptions({ minRetention: undefined }).minRetention, 0.75);
 });
 
 test('runSafetyGate: a good edit with the end marker => ok, marker-free sanitized html, link checked', async () => {

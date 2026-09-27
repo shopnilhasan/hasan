@@ -4226,15 +4226,17 @@ function safetyGateSummary(prompt) {
     line += ' · Fact check: ON with ' + (fcAi ? fcAi.aiName : 'the same AI') +
       (state.factCheckOnError === 'save' ? ' (saves anyway if the check breaks)' : ' (keeps the original if the check breaks)');
   }
-  // Prompts from before v3.46.0 have no end marker and web search Off, so the
-  // gate applies its strict no-research rules to them — say so up front.
+  // Prompts from before v3.46.0 have no end marker: the gate checks them with
+  // its structure rules only (no research rules). The strict no-research rules
+  // apply to Safety Gate prompts with web search Off — say so up front.
   const warn = [];
-  if (prompt && String(prompt.text || '').indexOf('APU-END') < 0) {
+  const gatePrompt = !!prompt && String(prompt.text || '').indexOf('APU-END') >= 0;
+  if (prompt && !gatePrompt) {
     const sgEditor = state.prompts.find(p => p.id === SAFETY_GATE_PROMPTS[0].id && isRunPrompt(p));
-    warn.push('⚠ The prompt "' + (prompt.name || 'Untitled') + '" was not written for the Safety Gate (it has no <!-- APU-END --> end marker), so more posts may be blocked and end up in Failed.' +
+    warn.push('⚠ The prompt "' + (prompt.name || 'Untitled') + '" was not written for the Safety Gate (it has no <!-- APU-END --> end marker), so the gate uses its structure rules: images, media, tables, links, shortcodes, blocks and lost text are checked; prices, dates and "Last updated" lines are not checked by code, and a cut-off reply is caught only by the older completeness checks.' +
       (sgEditor && sgEditor.id !== prompt.id ? ' The "' + sgEditor.name + '" prompt is made for it.' : ''));
   }
-  if (prompt && !prompt.webSearch) {
+  if (prompt && gatePrompt && !prompt.webSearch) {
     warn.push('⚠ Web search is OFF for this prompt: the Safety Gate blocks any new or removed price, percentage or year and any new "Last checked"/"updated" line, and removes new deep links. Tick "Allow AI web search with this prompt" if the prompt tells the AI to research.');
   }
   return line + (warn.length ? '\n' + warn.join('\n') : '');

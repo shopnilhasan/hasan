@@ -41,6 +41,14 @@
 //   S14 update mode "editor" (wp-admin Classic Editor): good edit → pasted,
 //       re-read, Update clicked, one write through the editor form
 //   S15 update mode "editor": AI drops an image → the editor is never touched
+//   S16 legacy prompt (built-in "Single Amazon Product": no end marker, web
+//       search off): the edit removes a price, adds "Last updated: <today>" and
+//       a new deep link to a live page → saved (structure rules only, link kept)
+//   S17 same legacy prompt, the edit drops an image → still blocked (IMG_COUNT)
+//   S18 first reply drops an image → blocked; the end-of-batch retry's payload
+//       carries a PRIORITY FIX note naming IMG_COUNT → good edit saved once
+//   S19 the edit strips <span style> clutter (~75% of the source length) and
+//       carries <!-- APU-END --> → accepted as complete and saved
 //
 // Usage:
 //   node extension-tests/e2e/run-e2e.js [--only S1,S4] [--skip S9] [--jobs 3]
@@ -436,6 +444,106 @@ const SCENARIOS = [
     }
   },
   {
+    // A prompt that was NOT written for the Safety Gate (the built-in "Single
+    // Amazon Product" prompt: no <!-- APU-END -->, web search off) gets the
+    // gate's structure rules only: a removed price, a "Last updated" line with
+    // today's date and a new deep link are not blocked, and the new link is
+    // still link-checked (alive → kept).
+    id: 'S16', title: S.SCENARIOS.S16.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
+    check(c, t) {
+      const expected = S.legacyEdit();
+      t.eq(c.writes.length, 1, 'exactly one WordPress write');
+      const saved = c.writes[0] ? c.writes[0].content : '';
+      t.same(saved, expected.trim(), 'saved content = the legacy edit (nothing unwrapped, nothing else changed)');
+      t.ok(S.LEGACY_ORIGINAL.indexOf('$25') >= 0 && saved.indexOf('$25') < 0, 'the price the prompt removes on purpose stays removed');
+      t.ok(saved.indexOf('Last updated: ' + localDateYmd()) >= 0, 'the "Last updated" line with today\'s date is saved');
+      t.ok(saved.indexOf('href="' + S.LIVE_LINK + '"') >= 0, 'the new deep link to a live page is kept');
+      IMG_SRCS.forEach((src) => t.ok(saved.indexOf('src="' + src + '"') >= 0, 'image kept: ' + src.split('/').pop()));
+      ORIGINAL_LINKS.forEach((href) => t.ok(saved.indexOf('href="' + href + '"') >= 0, 'original link kept: ' + href));
+      t.ok(c.linkRequests.some((r) => r.path === '/ok/cast-iron-care-notes'), 'the link check really fetched the new deep link');
+      const ep = c.editorChats[0] ? c.editorChats[0].payload : '';
+      t.ok(ep.indexOf('APU-END') < 0, 'legacy prompt: no end-marker contract in the payload');
+      t.same(bannerSection(ep, 'ARTICLE HTML'), S.LEGACY_ORIGINAL.trim(), 'editor payload carries the original (with the price)');
+      t.eq(c.editorChats.length, 1, 'one editor chat');
+      t.row(c, 'updated');
+      t.ok(c.row && c.row.factCheck && c.row.factCheck.verdict === 'pass', 'row.factCheck.verdict = pass');
+      t.log(c, /Gate rules: structure rules — this prompt is not a Safety Gate prompt/, 'log: structure rules for a prompt that is not a Safety Gate prompt');
+      t.notLog(c, /Gate rules: full rules/, 'log: never the full rule set');
+      t.notLog(c, /Removed link/, 'log: no link was removed');
+      t.log(c, /Safety Gate PASSED/, 'log: Safety Gate PASSED');
+      t.ok(/structure rules/.test(c.confirmText), 'Start confirm dialog explains the structure rules', c.confirmText);
+      t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
+    // The structure rules still protect images with the same legacy prompt.
+    id: 'S17', title: S.SCENARIOS.S17.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
+    check(c, t) {
+      t.eq(c.writes.length, 0, 'NO WordPress write');
+      t.same(c.post.content, S.LEGACY_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/^SAFETY GATE BLOCKED: /.test(c.row && c.row.message || ''), 'row message starts with SAFETY GATE BLOCKED');
+      const codes = (c.row && c.row.gate && c.row.gate.codes) || [];
+      t.ok(codes.indexOf('IMG_COUNT') >= 0, 'row.gate.codes contains IMG_COUNT', codes.join(','));
+      t.ok(!codes.some((x) => /RESEARCH|NUMBER_MISSING/.test(x)), 'no research-rule code (structure rules only)', codes.join(','));
+      t.eq(c.factChats.length, 0, 'no fact-check after a gate block');
+      t.log(c, /Gate rules: structure rules/, 'log: structure rules');
+      t.log(c, /Gate error — IMG_COUNT/, 'log: Gate error — IMG_COUNT');
+      t.panel(c, 'failedList', [c.slug, 'IMG_COUNT'], 'panel: Failed box row names IMG_COUNT');
+    }
+  },
+  {
+    // Automatic retries tell the AI why: the end-of-batch retry pass (the
+    // default retry mode) sends the gate reasons as a PRIORITY FIX note.
+    id: 'S18', title: S.SCENARIOS.S18.title, prompt: 'p_sg_editor',
+    storage: { retryMode: 'end', maxRetries: '1' },
+    check(c, t) {
+      const FIX_RE = /\u2550{3,}[ \t]+PRIORITY FIX\b/;
+      t.eq(c.editorChats.length, 2, 'two editor chats (first attempt + one automatic retry)');
+      const [e1, e2] = c.editorChats;
+      t.ok(e1 && !S.hasPriorityFixBlock(e1.payload), 'first payload has no PRIORITY FIX block');
+      t.ok(e2 && S.hasPriorityFixBlock(e2.payload), 'the retry payload carries a PRIORITY FIX block');
+      const note = e2 ? e2.payload.slice(Math.max(0, e2.payload.search(FIX_RE))) : '';
+      t.ok(/IMG_COUNT/.test(note), 'the PRIORITY FIX note names IMG_COUNT');
+      t.ok(/REJECTED by the automatic Safety Gate/.test(note), 'the note says the Safety Gate rejected the previous edit');
+      t.ok(/Keep every image of the original/.test(note), 'the note says what to do (keep every image)');
+      t.ok(note.length < 3300, 'the note is short (' + note.length + ' chars)');
+      t.eq(e2 ? (e2.payload.match(new RegExp(FIX_RE.source, 'g')) || []).length : 0, 1, 'exactly one PRIORITY FIX block');
+      t.ok(e1 && e2 && e1.conversationId !== e2.conversationId, 'the retry used a NEW chat');
+      t.same(e2 && bannerSection(e2.payload, 'ARTICLE HTML'), S.ORIGINAL_HTML.trim(), 'the retry edits the ORIGINAL article');
+      t.eq(c.writes.length, 1, 'saved exactly once');
+      t.same(c.writes[0] ? c.writes[0].content : '', S.GOOD_EDIT.trim(), 'saved content = the retry\'s good edit');
+      t.row(c, 'updated');
+      t.eq(c.factChats.length, 1, 'one fact check (only the good edit reached it)');
+      t.log(c, /Queued "cast-iron-care-s18" for the end-of-batch retry pass/, 'log: queued for the end-of-batch retry pass');
+      t.log(c, /The retry tells the AI why the previous edit was rejected \(Safety Gate: [A-Z_, ]*IMG_COUNT/, 'log: the retry attached the gate reasons');
+      t.eq(c.logLines.filter((l) => /SAFETY GATE BLOCKED the AI edit/.test(l)).length, 1, 'log: the gate blocked only the first attempt');
+      t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
+    // End-marker-aware completeness: cleaning up <span style> clutter shrinks
+    // the HTML below the 85% length minimum; the reply carries <!-- APU-END -->
+    // so it is not treated as cut off (the gate still checks the words).
+    id: 'S19', title: S.SCENARIOS.S19.title, prompt: 'p_sg_editor', original: S.SPANS_ORIGINAL,
+    check(c, t) {
+      const cov = S.GOOD_EDIT.length / S.SPANS_ORIGINAL.length;
+      t.ok(cov < 0.8, 'the edit is ' + Math.round(cov * 100) + '% of the source length (below the 85% completeness minimum)');
+      t.eq(c.writes.length, 1, 'exactly one WordPress write');
+      const saved = c.writes[0] ? c.writes[0].content : '';
+      t.same(saved, S.GOOD_EDIT.trim(), 'saved content = the cleaned-up edit (marker stripped)');
+      t.ok(saved.indexOf('<span style=') < 0, 'the span clutter is gone');
+      IMG_SRCS.forEach((src) => t.ok(saved.indexOf('src="' + src + '"') >= 0, 'image kept: ' + src.split('/').pop()));
+      t.eq(c.editorChats.length, 1, 'one editor chat (no continue prompt, no retry)');
+      t.row(c, 'updated');
+      t.log(c, /Code box COMPLETE at \d+ chars \(\d+% of source/, 'log: the code box was accepted as complete');
+      t.log(c, /accepted because it carries the <!-- APU-END --> end marker/, 'log: the end-marker exception was used');
+      t.notLog(c, /looks truncated|looked incomplete|asking the AI to continue|Output looks cut/i, 'log: no truncation handling');
+      t.log(c, /Safety Gate PASSED/, 'log: Safety Gate PASSED');
+      t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
     // Same AI replies as S2, but the browser profile has NOT allowed clipboard
     // access on the chat site (a fresh Chrome profile). The edit is < 98% of
     // the source, so waitForAIResponse's preferCopyIfLonger clicks the code
@@ -493,7 +601,7 @@ async function runScenario(sc, env) {
     const suffix = key ? '-' + key.toLowerCase() : '';
     const slug = 'cast-iron-care-' + sc.id.toLowerCase() + suffix;
     const item = { key, slug, postId: base + i, title: 'How to Care for Cast Iron (' + sc.id + (key ? '-' + key : '') + ')', writes: [], row: null };
-    env.srv.state.posts.set(item.postId, { id: item.postId, slug, title: item.title, content: S.ORIGINAL_HTML, link: 'http://' + S.WP_HOST + '/' + slug + '/' });
+    env.srv.state.posts.set(item.postId, { id: item.postId, slug, title: item.title, content: sc.original || S.ORIGINAL_HTML, link: 'http://' + S.WP_HOST + '/' + slug + '/' });
     return item;
   });
   const slugs = items.map((x) => x.slug);

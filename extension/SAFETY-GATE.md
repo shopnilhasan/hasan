@@ -12,6 +12,10 @@ The row goes to **❌ Failed posts** with the reason.
   when the reply was cut off, or when chat text, Markdown or placeholders got into the article.
 - **Link test.** Every new link the AI added is opened once.
   A dead link is removed. Its words stay in the text.
+- **Two rule sets.** Prompts written for the Safety Gate get every check.
+  Your older prompts get the structure checks only (see section 4.1).
+- **Retries say why.** When the batch retries a blocked post by itself,
+  the new chat is told why the last edit was rejected (see section 5).
 - **AI fact check.** After the Safety Gate passes, a **new** chat compares the original and the edit.
   It looks for wrong facts, made-up details, lost information and risky advice.
   If it finds a problem, the AI gets **one** chance to fix it in another new chat.
@@ -80,15 +84,16 @@ Click **Load unpacked** and pick the folder that holds `manifest.json`.
   Web search is already allowed for it (you see "WEB SEARCH" next to its name). Keep it that way.
   It was written for the Safety Gate: it ends its reply with `<!-- APU-END -->`,
   so a cut-off reply is always caught.
-- **Affiliate posts**: keep your own affiliate prompts. Leave "Allow AI web search" **off** for them.
-  The Start box then shows two warnings (no end marker, web search off). That is expected.
-  It means the strict rules apply: the AI may not add or remove prices, percentages or years,
-  may not add "Last checked" or "updated" lines, and new deep links are removed.
-  So an affiliate edit that adds specs or prices, removes a price, or adds a "Last updated" line is blocked.
-  The original then stays live.
+- **Affiliate posts**: keep your own affiliate prompts (for example the built-in "Single Amazon Product").
+  They have no end marker, so the Safety Gate checks them with its **structure rules** (section 4.1).
+  The Start box shows a note about this. That is expected.
+  Removing a price, adding a "Last updated" line or adding a new link to a live page is then **not** blocked.
+  Lost images, tables, links, shortcodes, blocks or text are still blocked.
 - Optional, for your own prompts: add this sentence to the output part of the prompt:
   "The last line inside the code block must be `<!-- APU-END -->`."
   Then a cut-off reply is caught for those prompts too. The marker is never saved to WordPress.
+  But the prompt then counts as a Safety Gate prompt and gets **all** rules (section 4.1),
+  including the no-research rules when web search is off. Only do this for prompts that follow those rules.
   If many posts then fail with END_MARKER_MISSING, remove the sentence again.
 
 **In ChatGPT**
@@ -118,6 +123,33 @@ Click **Load unpacked** and pick the folder that holds `manifest.json`.
 Each post now takes longer: one more chat, sometimes two.
 The fact check uses the same "AI response timeout" as the edit.
 
+### 4.1 Which rules apply (per prompt)
+
+The extension looks at the run prompt. A prompt that contains `APU-END` (it asks for the `<!-- APU-END -->` end marker)
+is a **Safety Gate prompt**, like "Informational Editor (Safety Gate)". Every other prompt is an **older prompt**.
+The log says which rule set was used, on a line with "🛡 Gate rules".
+
+| | Safety Gate prompt | Older prompt (no end marker) |
+|---|---|---|
+| Images, media, tables, links, shortcodes, blocks, scripts | checked | checked |
+| Chat text, Markdown, placeholders, "rest unchanged" notes | checked | checked |
+| Lost text (CONTENT_LOSS: at least 80% of the words) | checked | checked |
+| Rewritten text (CONTENT_RETENTION) | at least 75% of the original words kept | at least 60% kept (older "audit + fix" prompts rewrite more) |
+| New links | tested; dead, private, internal or forbidden links removed | the same |
+| Cut-off reply (END_MARKER_MISSING) | checked | not possible (no marker); the older completeness check catches most cut-offs |
+| No-research rules, when web search is **off** for the prompt: no new or removed prices, percentages or years, no new "Last checked" / "updated" line or today's date, new deep links removed | checked | **not checked** |
+| Older completeness check | its length part (85%) is skipped when the reply carries the end marker; its other parts stay (see below) | as before |
+
+**Why.** Older affiliate prompts change prices and dates on purpose (for example the Amazon prompt removes prices
+and adds a "Last updated" line). With the strict no-research rules almost every such post would fail.
+
+**Completeness and the end marker.** The older completeness check wants at least 85% of the original length.
+Cleaning up messy code (such as `<span style="...">` leftovers from Word or Google Docs) can make a complete edit shorter.
+So with the Safety Gate on, a Safety Gate prompt and the `<!-- APU-END -->` marker in the reply,
+a reply is no longer refused for its length alone. All other completeness checks stay.
+The Safety Gate still counts the **words** (CONTENT_LOSS, CONTENT_RETENTION), so real lost text is still blocked.
+The log then says "accepted because it carries the <!-- APU-END --> end marker".
+
 ## 5. Why a post failed, and what to do
 
 The live post is always the original. Nothing is broken.
@@ -125,6 +157,14 @@ Open the row in **❌ Failed posts** to see the reason.
 
 **General rules**
 
+- **Automatic retries tell the AI why.** When "If a post fails" retries a post by itself
+  ("retry right away", "retry at the END of the batch", parallel runs, or the fallback AI) after SAFETY GATE BLOCKED or FACT CHECK BLOCKED,
+  the new chat gets a short **PRIORITY FIX** note at the end of the prompt, for example:
+  "Your previous edit of this exact article was REJECTED by the automatic Safety Gate ... IMG_COUNT — Image count changed:
+  original 2, edited 1. Keep every image of the original exactly as it is ...".
+  Each retry gets only the reasons of the attempt just before it (at most about 3,000 characters).
+  Other failures (timeouts, no code box, FACT CHECK ERROR) get no note. Fast Submit (phase 1) never adds one.
+  The log shows "↻ The retry tells the AI why the previous edit was rejected".
 - A real AI mistake: click **↻ Retry new** on the row. It starts a new chat and tells the AI what went wrong.
 - **↻ Retry AI session** and **↻ Recover any code** read the **same** reply again.
   They are only useful after you changed a setting (for example you allowed web search).
@@ -164,7 +204,7 @@ The message looks like: `SAFETY GATE BLOCKED: IMG_COUNT, LINK_MISSING — ... Th
 |---|---|---|
 | TABLE_LOSS | Fewer tables or table rows than the original. Protects product and price tables. | Retry new. |
 | CONTENT_LOSS | Less than 80% of the words are left. | Retry new. |
-| CONTENT_RETENTION | Less than 75% of the original words are still there. The AI rewrote too much. | Retry new. The prompt should edit sentences, not rewrite sections. |
+| CONTENT_RETENTION | Less than 75% of the original words are still there (60% with an older prompt, section 4.1). The AI rewrote too much. | Retry new. The prompt should edit sentences, not rewrite sections. |
 | WORD_RATIO_EXTREME | The edit is more than 5 times longer. | Retry new. |
 | DUPLICATE_CONTENT | The same text appears twice. | Retry new. |
 
@@ -207,9 +247,11 @@ The message looks like: `SAFETY GATE BLOCKED: IMG_COUNT, LINK_MISSING — ... Th
 | SECTION_DUPLICATED | A second FAQ, Sources list or Last checked line. | Retry new. |
 | NEW_FAQ_NOT_ALLOWED | A new FAQ was added, but "New FAQ section" is "No". | Retry new, or set it to Auto. |
 | LAST_CHECKED_NOT_ALLOWED | A "Last checked" line was added, but the prompt says no. | Retry new. |
-| NEW_NUMBER_WITHOUT_RESEARCH | Web search is off, but the AI added a new price, percentage or year. | Retry new. For informational posts, use a prompt with web search allowed. |
-| NUMBER_MISSING | Web search is off, but a price, percentage or year of the original is gone. | Retry new. |
-| LAST_CHECKED_WITHOUT_RESEARCH | Web search is off, but the AI added a "Last checked" / "updated" line or today's date. | Retry new. |
+| NEW_NUMBER_WITHOUT_RESEARCH | Safety Gate prompt with web search off, but the AI added a new price, percentage or year. | Retry new. For informational posts, use a prompt with web search allowed. |
+| NUMBER_MISSING | Safety Gate prompt with web search off, but a price, percentage or year of the original is gone. | Retry new. |
+| LAST_CHECKED_WITHOUT_RESEARCH | Safety Gate prompt with web search off, but the AI added a "Last checked" / "updated" line or today's date. | Retry new. |
+
+These three codes never appear for older prompts (section 4.1).
 
 **Rare technical codes**
 
@@ -272,13 +314,15 @@ such a post is saved after the Safety Gate passed. Its row in Successful shows "
 Messages without these three prefixes come from the older checks, the same as in v3.45.0:
 for example a cut-off reply ("sections look missing", "only 74% of the source length"),
 no code block, or report text in the reply. Retry new.
+("only …% of the source length" no longer happens with a Safety Gate prompt when the reply carries the end marker, section 4.1.)
 
 ## 6. Known limits
 
 - **Not tested on the live ChatGPT website.** All tests used local copies of ChatGPT-like pages
   and a fake WordPress. Real pages change often. Start with Test First Post and a small batch.
-- **More posts in Failed.** The checks are strict on purpose. Old prompts (no end marker, no web search) fail more often.
-  Failed posts count toward "stop after N failures in a row".
+- **More posts in Failed.** The checks are strict on purpose. Failed posts count toward "stop after N failures in a row".
+- **Older prompts get fewer checks.** Without the end marker the code does not check prices, dates or "Last updated" lines
+  (section 4.1). A cut-off reply is then caught only by the older completeness checks. The fact check still reads the edit.
 - **Slower and uses more of your AI limit.** One more chat per post, sometimes two.
 - **The link test cannot see pages that block robots** (403, 429, Cloudflare checks).
   A new deep link to such a page is removed (the words stay). Homepages are kept.
@@ -286,8 +330,8 @@ no code block, or report text in the reply. Retry new.
 - **Links to local or private addresses** (`localhost`, `192.168.x.x`, ...) are never opened. They are removed.
 - **A new link to a homepage** (no path) is kept when the site does not answer,
   because the browser does not say why a request failed. A new link to any other page is removed then.
-- **Automatic retries do not know the reason.** A new-session retry during the batch uses the same prompt again.
-  The **↻ Retry new** button on a Failed row does send the reasons.
+- **Automatic retries tell the AI why, but they may fail again.** The AI can repeat the same mistake.
+  Each retry is still checked in full. The reasons are carried from the main pass to the end-of-batch retry pass.
 - **The fact check is only as good as the AI.** The same AI can miss its own mistakes.
   Without web search it flags every new price, date or spec it cannot check, so more posts are blocked.
 - **Only the five known chat sites are read reliably** for the fact-check verdict
@@ -297,7 +341,9 @@ no code block, or report text in the reply. Retry new.
 - **Auto-split (experimental):** the Safety Gate checks the joined article.
   A cut-off middle part is caught only by the length and section checks.
 - **The completeness check** (Balanced: at least 85% of the length) can still block an edit that removed a lot
-  of messy code, such as `<span>` leftovers from Word or Google Docs. The prompt tells the AI to keep them.
+  of messy code, such as `<span>` leftovers from Word or Google Docs, when the prompt is an older prompt
+  or the reply has no end marker. With a Safety Gate prompt and the marker, the length alone no longer blocks it.
+  The re-joined article of Auto-split keeps the full length check.
 - **The editor prompt is long** (about 58,000 characters). With a very long article the reply may not fit.
   Then END_MARKER_MISSING blocks the post (safe, but not updated).
 - **The reference original** is the earliest backup of this run (the extension keeps the last 300 backups).
