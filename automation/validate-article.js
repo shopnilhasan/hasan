@@ -4,8 +4,8 @@
  *
  * Plain, dependency-free JavaScript. Works in Node 18+ (require it, or run it as a CLI)
  * and can be pasted as a whole into an n8n "Code" node (then call the functions directly).
- * Regex/string parsing only (no DOM). Every pattern is written so a 300 KB article is
- * processed in well under a second, even when the HTML is broken.
+ * Regex/string parsing only (no DOM). Every pattern is written so a 1 MB article is
+ * processed in well under two seconds, even when the HTML is broken.
  *
  * Main functions (see automation/README.md for the full pipeline):
  *   parseEditorOutput(text)                               -> { ok, status, html, meta, errors }
@@ -113,50 +113,57 @@ const PLACEHOLDER_PATTERNS = [
   ['XX', /\bX{2,}\b/g]
 ];
 // Placeholder shapes inside JSON-LD string values (FAQ schema).
-const JSONLD_PLACEHOLDER_RE = /\{\{[^}]{0,40}\}\}|\[VERIFY|\[TODO|\bTODO\s*:|\bTBD\b|REAL-URL|PASTE YOUR/i;
+// (TODO:/TBD are case-sensitive: Spanish "todo:" is a normal word.)
+const JSONLD_PLACEHOLDER_RE = /\{\{[^}]{0,40}\}\}|\[(?:VERIFY|verify|Verify|TODO|todo)\b|\bTODO\s*:|\bTBD\b|REAL-URL|real-url|PASTE YOUR|paste your/;
 
 // Markdown and search-tool citation artifacts (counted as edited minus original, visible text outside <pre>/<code>).
 const MARKDOWN_PATTERNS = [
   ['markdown link [text](url)', /\]\((?:https?:|\/)/g],
   ['markdown bold **text**', /\*\*[^*\s][^*]{0,200}?\*\*/g],
-  ['citation mark 【…】', /【[^】]{0,40}】/g],
-  ['citation mark [cite…]', /\[cite[^\]]{0,20}\]/gi],
+  ['citation mark \u3010\u2026\u3011', /\u3010[^\u3011]{0,40}\u3011/g],
+  ['citation mark [cite\u2026]', /\[cite[^\]]{0,20}\]/gi],
   ['numeric citation [n]', /(?:^|[^\w\]])\[\d{1,2}\](?!\()/g]
 ];
 const MARKDOWN_HEADING_RE = /(?:^|\n)[ \t]{0,3}#{1,6}[ \t]+\S/g;
 
-// "Rest of the article unchanged" and similar omission notes (visible text and HTML comments).
+// "Rest of the article unchanged" and similar omission notes. OMISSION_PATTERNS are tested on SHORT text blocks
+// only (a paragraph of <= 20 words that is just the note), so normal sentences ("the content stays unchanged when you
+// switch themes" inside a longer paragraph) are not caught. OMISSION_NOTE_RE (a bracketed/parenthesised note) and
+// OMISSION_COMMENT_RE (new HTML comments) apply anywhere.
 const OMISSION_PATTERNS = [
   /\b(?:rest|remainder) of (?:the |this )?(?:article|post|content|text|html|page|document)\b/gi,
-  /\b(?:article|post|content|text|html|section|sections|everything else|all else|remaining (?:content|text|sections?|paragraphs?))\s+(?:remains?|stays?|is|are|was|were|left|kept)\s+(?:unchanged|the same|as is|as before|intact)\b/gi,
+  /\b(?:article|post|content|html|everything else|all else|other sections|remaining (?:content|text|sections?|paragraphs?))\s+(?:remains?|stays?|is|are|was|were|left|kept)\s+(?:unchanged|as is|as before|intact)\b/gi,
   /\bunchanged from (?:the )?original\b/gi,
-  /\[\s*(?:\.\.\.|…)\s*\]/g,
+  /^\s*[\[(]?\s*(?:\.\.\.|…)\s*[\])]?\s*$/g,
   /\b(?:omitted|truncated|shortened|abbreviated) for (?:brevity|length|space)\b/gi,
   /\bcontent (?:continues|omitted|truncated)\b/gi,
   /\b(?:same|continues) as (?:in )?(?:the )?original\b/gi
 ];
-const OMISSION_COMMENT_RE = /unchanged|omitted|truncated|continues|continued|rest of|remainder|same as (?:the )?original|as before|\.\.\.|…|\bsnip\b/i;
+const OMISSION_NOTE_RE = /[\[(][^\])\n]{0,80}\b(?:unchanged|omitted|truncated|continues|continued|same as (?:the )?original|as before|rest of (?:the |this )?(?:article|post|content|text|html)|remainder of|remaining (?:sections?|content|text))\b[^\])\n]{0,80}[\])]/gi;
+const OMISSION_COMMENT_RE = /unchanged|omitted|truncated|continues|continued|rest of|remainder|same as (?:the )?original|as before|\.\.\.|\u2026|\bsnip\b/i;
 
 // Words of the model's own around the article (chat text). Anchored at the start of a new bare text segment
 // or of the article's visible text; LLM_CHATTER_ANY_RE may appear anywhere (counted as new occurrences).
 const CHATTER_START_RE = new RegExp('^(?:' + [
-  "here(?:'s|\\u2019s| is| are)\\s+(?:the|your)\\b[^.!?]{0,60}?\\b(?:article|html|version|post|content|edit|rewrite|draft)\\b",
-  'below (?:is|are) (?:the|your)\\b',
-  'sure[,!.]', 'certainly[,!.]', 'absolutely[,!.]',
+  "here(?:'s|\\u2019s| is| are)\\s+(?:the|your)\\s+(?:(?:complete|full|fully|final|updated|revised|edited|improved|rewritten|fixed|new|corrected|polished|optimi[sz]ed|seo[- ]optimi[sz]ed)\\s+){0,3}(?:article|html|version|post|content|edit|rewrite|draft)\\b",
+  'below (?:is|are) (?:the|your)\\s+(?:(?:complete|full|final|updated|revised|edited|improved|rewritten|fixed)\\s+){0,3}(?:article|html|version|post|content)\\b',
+  '(?:sure|certainly|of course|absolutely)[,!.]\\s+(?:here|i\\b|below)',
   "i(?:'ve|\\u2019ve| have)?\\s+(?:kept|made|added|removed|changed|edited|updated|revised|rewrote|rewritten|improved|preserved)\\s+(?:all|every|the|your|some|a few|several|these|those|it|this)\\b[^.!?]{0,40}?\\b(?:images?|links?|article|content|text|headings?|structure|changes|edits|html|markup|shortcodes?|blocks?|formatting|sections?)\\b",
   '(?:the\\s+)?(?:complete|full|final|fixed|edited|updated|revised|improved|rewritten)\\s+(?:article|html|version)(?:\\s+html)?\\s*:?\\s*$',
   'article html\\s*:?\\s*$',
   '(?:```)?\\s*(?:html?|json|xml|markup)\\s*:?\\s*$',
   'end of (?:the )?(?:article|html)\\b'
 ].join('|') + ')', 'i');
-const LLM_CHATTER_ANY_RE = /\blet me know if you(?:'d|’d| would)? (?:like|want|need)\b|\bhope this helps\b|\bas an ai\b|\bas a (?:large )?language model\b|\bi hope (?:this|these) (?:edits?|changes|version|article) help/gi;
+const LLM_CHATTER_ANY_RE = /\blet me know if you(?:'d|\u2019d| would)? (?:like|want|need) (?:me to |any |more |further |other |additional |some )*(?:changes?|edits?|revisions?|adjustments?|tweaks?|modifications?|anything else)\b|\bas an ai language model\b|\bas a (?:large )?language model\b|\bi hope (?:these|this|the) (?:edits?|changes|revisions?|version|rewrite) helps?\b/gi;
 
 // FAQ section headings in the user's languages (a FAQ counts as present when a heading matches).
-const FAQ_HEADING_RE = /\bfaqs?\b|frequently asked|common questions|questions? (?:and|&) answers?|\bq ?& ?a\b|häufig gestellte fragen|häufige fragen|preguntas frecuentes|questions fréquentes|foire aux questions|domande frequenti|perguntas frequentes|veelgestelde vragen|vanliga frågor|ofte stillede spørgsmål|ofte stilte spørsmål|usein kysyt|najczęściej zadawane pytania|często zadawane pytania|sıkça sorulan sorular|часто задаваемые вопросы|সাধারণ প্রশ্ন|প্রায়শই জিজ্ঞাসিত|সচরাচর জিজ্ঞাসিত|अक्सर पूछे जाने वाले/i;
+const FAQ_HEADING_RE = /\bfaqs?\b|frequently asked|common questions|questions? (?:and|&) answers?|\bq ?& ?a\b|h\u00e4ufig gestellte fragen|h\u00e4ufige fragen|preguntas frecuentes|questions fr\u00e9quentes|foire aux questions|domande frequenti|perguntas frequentes|veelgestelde vragen|vanliga fr\u00e5gor|ofte stillede sp\u00f8rgsm\u00e5l|ofte stilte sp\u00f8rsm\u00e5l|usein kysyt|najcz\u0119\u015bciej zadawane pytania|cz\u0119sto zadawane pytania|s\u0131k\u00e7a sorulan sorular|\u0447\u0430\u0441\u0442\u043e \u0437\u0430\u0434\u0430\u0432\u0430\u0435\u043c\u044b\u0435 \u0432\u043e\u043f\u0440\u043e\u0441\u044b|\u09b8\u09be\u09a7\u09be\u09b0\u09a3 \u09aa\u09cd\u09b0\u09b6\u09cd\u09a8|\u09aa\u09cd\u09b0\u09be\u09af\u09bc\u09b6\u0987 \u099c\u09bf\u099c\u09cd\u099e\u09be\u09b8\u09bf\u09a4|\u09b8\u099a\u09b0\u09be\u099a\u09b0 \u099c\u09bf\u099c\u09cd\u099e\u09be\u09b8\u09bf\u09a4|\u0905\u0915\u094d\u0938\u0930 \u092a\u0942\u091b\u0947 \u091c\u093e\u0928\u0947 \u0935\u093e\u0932\u0947/i;
 
 // Freshness / verification claims that need research (webSearchCount 0 => hard error when new).
+// A date-like span right after the claim word ("Updated: September 2026", "updated for 2026", "reviewed 27.09.2026");
+// "the rules were updated in 2023" (a fact, after was/were/been) is not a freshness claim.
 const FRESHNESS_PATTERNS = [
-  /\b(?:last updated|updated|verified|fact[- ]checked|reviewed)\b[^.!?]{0,40}\b(?:19|20)\d\d\b/gi,
+  /(?<!\b(?:was|were|been|being|is|are|be|get|gets|got)\s)\b(?:last updated|updated|verified|fact[- ]checked|reviewed)\b\s*(?::|on|in|for|as of|-|\u2013)?\s*(?:\d{1,2}(?:st|nd|rd|th)?\.?\s+)?(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?(?:\d{1,2}(?:st|nd|rd|th)?,?\s+)?(?:\d{1,2}[./-]\d{1,2}[./-])?(?:19|20)\d\d\b/gi,
   /\b(?:prices|figures|facts|dates|data)\s+(?:were\s+|are\s+|have been\s+)?(?:verified|checked|confirmed)\b/gi
 ];
 
@@ -263,8 +270,10 @@ function multiset(list) {
 }
 
 function short(s, n) {
-  s = toStr(s).replace(/\s+/g, ' ').trim();
   n = n || 90;
+  s = toStr(s);
+  if (s.length > n * 4 + 200) s = s.slice(0, n * 4 + 200);
+  s = s.replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n - 1) + '\u2026' : s;
 }
 
@@ -1670,9 +1679,10 @@ function faqQuestionsFromJsonLd(data) {
   return out;
 }
 
+/** "Last checked" LINES (followed by a date), not "since you last checked your tyres". */
 function lastCheckedSnippets(text) {
   const out = [];
-  const re = /last checked\b[^.!?]{0,60}/gi;
+  const re = /last checked\s*(?::|on\b|-|\u2013)?\s*(?=\d|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b)[^.!?]{0,60}/gi;
   let m;
   while ((m = re.exec(text))) out.push(normalizeForMatch(m[0]));
   return out;
@@ -1696,7 +1706,7 @@ const FIG_YEAR_RE = /(?<!\d)(?:19|20)\d\d(?!\d)/g;
 const FIG_NUM_RE = new RegExp(NUM_SRC, 'g');
 
 function normFigure(n) {
-  return toStr(n).replace(/[,\s  ']/g, '').replace(/\.+$/, '').replace(/\.0{1,2}$/, '');
+  return toStr(n).replace(/[,\s\u00a0\u202f']/g, '').replace(/\.+$/, '').replace(/\.0{1,2}$/, '');
 }
 
 /**
@@ -1829,7 +1839,20 @@ function todayDatePatterns(today) {
 }
 
 const BLOCK_BREAK_RE_G = new RegExp('<\\/?(?:' + BLOCK_CONTAINER_TAGS.join('|') + '|hr)(?=[\\s>/])' + ATTRS_SRC + '>', 'gi');
-const CHATTER_END_RE = /(?:^|[.!?]\s+)i(?:'ve|’ve| have)?\s+(?:kept|made|added|removed|changed|edited|updated|revised|rewrote|rewritten|improved|preserved)\s+(?:all|every|the|your|some|a few|several|these|those|it|this)\b[^.!?]{0,40}?\b(?:images?|links?|article|content|text|headings?|structure|changes|edits|html|markup|shortcodes?|blocks?|formatting|sections?)\b[^.!?]{0,120}[.!?]?\s*$/i;
+const CHATTER_END_RE = /(?:(?:^|[.!?]\s+)i(?:'ve|\u2019ve| have)?\s+(?:kept|made|added|removed|changed|edited|updated|revised|rewrote|rewritten|improved|preserved)\s+(?:all|every|the|your|some|a few|several|these|those|it|this)\b[^.!?]{0,40}?\b(?:images?|links?|article|content|text|headings?|structure|changes|edits|html|markup|shortcodes?|blocks?|formatting|sections?)\b[^.!?]{0,120}|\bhope this helps)[.!?]?\s*$/i;
+
+/**
+ * Paragraph-like text chunks: text between block-level tags, also split on blank lines (wpautop).
+ * Cached on the analysis object; chunks over 20000 characters are skipped (not a paragraph).
+ */
+function textChunks(A) {
+  if (A.chunks) return A.chunks;
+  A.chunks = A.markup.replace(BLOCK_BREAK_RE_G, '\n\n').split(/\n[ \t\u00a0]*\n/)
+    .filter(function (c) { return c.length <= 20000 && /\S/.test(c); })
+    .map(function (c) { return visibleText(c, { isMarkup: true }); })
+    .filter(Boolean);
+  return A.chunks;
+}
 
 function isFaqHeading(h) {
   return FAQ_HEADING_RE.test(h.text) && !/\?\s*$/.test(h.text);
@@ -2144,17 +2167,24 @@ function validateArticle(originalHtml, editedHtml, options) {
   }
   if (md.length) error('MARKDOWN', 'Markdown or search-tool citation marks in the HTML: ' + md.join(', '));
   const om = [];
+  const shortO = textChunks(O).filter(function (c) { return countWords(c) <= 20; });
+  const shortE = textChunks(E).filter(function (c) { return countWords(c) <= 20; });
+  const countIn = function (list, re) { let n = 0; for (const c of list) n += countMatches(c, re); return n; };
   for (const re of OMISSION_PATTERNS) {
-    if (countMatches(E.text, re) > countMatches(O.text, re)) {
-      re.lastIndex = 0;
-      const m = re.exec(E.text);
-      re.lastIndex = 0;
-      om.push('"' + short(m ? m[0] : re.source, 60) + '"');
+    if (countIn(shortE, re) > countIn(shortO, re)) {
+      const hit = shortE.filter(function (c) { return countMatches(c, re) > 0; })[0];
+      om.push('"' + short(hit || '', 60) + '"');
     }
+  }
+  if (countMatches(E.text, OMISSION_NOTE_RE) > countMatches(O.text, OMISSION_NOTE_RE)) {
+    OMISSION_NOTE_RE.lastIndex = 0;
+    const m = OMISSION_NOTE_RE.exec(E.text);
+    OMISSION_NOTE_RE.lastIndex = 0;
+    om.push('"' + short(m ? m[0] : '', 60) + '"');
   }
   const newComments = multisetExcess(multiset(O.plainComments), multiset(E.plainComments));
   for (const entry of newComments) {
-    if (OMISSION_COMMENT_RE.test(entry[0]) || OMISSION_PATTERNS.some(function (re) { re.lastIndex = 0; const r = re.test(entry[0]); re.lastIndex = 0; return r; })) {
+    if (OMISSION_COMMENT_RE.test(entry[0]) || OMISSION_PATTERNS.some(function (re) { return countMatches(entry[0], re) > 0; })) {
       om.push('comment <!-- ' + short(entry[0], 60) + ' -->');
     } else {
       warn('NEW_HTML_COMMENT', 'New HTML comment (it is published in the page source): <!-- ' + short(entry[0], 80) + ' -->');
@@ -2192,10 +2222,7 @@ function validateArticle(originalHtml, editedHtml, options) {
   const blockTexts = function (A) {
     if (classicMode) {
       // Classic content: paragraphs are blank-line separated text (wpautop) as well as block elements.
-      return A.markup.replace(BLOCK_BREAK_RE_G, '\n\n').split(/\n[ \t ]*\n/)
-        .filter(function (c) { return c.length <= 20000 && /\S/.test(c); })
-        .map(function (c) { return normalizeForMatch(visibleText(c, { isMarkup: true })); })
-        .filter(function (t) { return countWords(t) >= 12; });
+      return textChunks(A).map(normalizeForMatch).filter(function (t) { return countWords(t) >= 12; });
     }
     // Leaf paragraphs/items only (bounded size): broken or nested markup must not make this quadratic.
     return scanElements(A.markup, ['p', 'li'], false)
@@ -2233,8 +2260,9 @@ function validateArticle(originalHtml, editedHtml, options) {
         break;
       }
     }
-    const fO = figureInfo(O.text);
-    const fE = figureInfo(E.text);
+    // Shortcode attributes (width="800" ...) are not article figures.
+    const fO = figureInfo(O.text.indexOf('[') >= 0 ? O.text.replace(SHORTCODE_RE_G, ' ') : O.text);
+    const fE = figureInfo(E.text.indexOf('[') >= 0 ? E.text.replace(SHORTCODE_RE_G, ' ') : E.text);
     const added = [];
     for (const entry of fE.tokens) if (!fO.tokens.has(entry[0]) && !fO.numbers.has(entry[1])) added.push(entry[0]);
     if (added.length) error('NEW_NUMBER_WITHOUT_RESEARCH', 'New price, percentage or year without any web research: ' + added.slice(0, 10).join(', '));
@@ -2366,6 +2394,7 @@ function validateArticle(originalHtml, editedHtml, options) {
     wordsOriginal: O.words,
     wordsEdited: E.words,
     wordRatio: isFinite(ratio) ? Math.round(ratio * 1000) / 1000 : null,
+    wordRetention: Math.round(retention * 1000) / 1000,
     newExternalLinks: newExternal.length,
     boxes: E.boxes,
     headings: headingCounts
@@ -2412,49 +2441,99 @@ function attributeText(html) {
   return parts.join(' | ');
 }
 
-function quoteFound(quote, corpusN, corpusL) {
-  let q = decodeEntities(toStr(quote));
-  if (/<[a-zA-Z\/]/.test(q)) q = visibleText(q);
-  q = normalizeForMatch(q).replace(/^["'\s]+|["'\s]+$/g, '');
-  if (!q) return false;
-  if (corpusN.indexOf(q) >= 0) return true;
-  const ql = looseNormalize(q);
-  if (ql && corpusL.indexOf(ql) >= 0) return true;
-  if (/\.\.\./.test(q)) {
-    const parts = q.split(/\.\.\./).map(looseNormalize).filter(Boolean);
-    if (!parts.length) return false;
-    let pos = 0;
-    for (const p of parts) {
-      const i = corpusL.indexOf(p, pos);
-      if (i < 0) return false;
-      pos = i + p.length;
+// Citation marks a search tool may add to a quote: [1], \u30103\u2020source\u3011, [cite: 1], ([site.com](url)).
+const QUOTE_CITATION_RE = /\[\d{1,2}\]|\u3010[^\u3011]{0,60}\u3011|\[cite[^\]]{0,40}\]|\(\[[^\]]{0,80}\]\([^)]{0,300}\)\)/gi;
+
+/** Corpus prepared once per audit: normalised strings plus a token index for the fuzzy fallback. */
+function quoteCorpus(text) {
+  const n = normalizeForMatch(text);
+  const l = looseNormalize(text);
+  const tokens = l ? l.split(' ') : [];
+  const index = new Map();
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const list = index.get(t);
+    if (list) list.push(i); else index.set(t, [i]);
+  }
+  return { n: n, l: l, tokens: tokens, index: index };
+}
+
+/**
+ * Fuzzy fallback: at least 80% of the quote's words appear, in order, inside a window of 1.5x the quote's
+ * length in the article (a lightly paraphrased quote). Bounded work per quote.
+ */
+function fuzzyQuoteFound(qTokens, corpus) {
+  const m = qTokens.length;
+  if (m < 5 || !corpus.tokens.length) return false;
+  const need = Math.ceil(m * 0.8);
+  const w = Math.ceil(m * 1.5);
+  const T = corpus.tokens;
+  const starts = new Set();
+  for (let k = 0; k <= m - need; k++) {
+    const list = corpus.index.get(qTokens[k]);
+    if (list) for (const i of list) starts.add(i);
+  }
+  let budget = 3000000;
+  const prev = new Array(m + 1);
+  const cur = new Array(m + 1);
+  for (const st of starts) {
+    const end = Math.min(T.length, st + w);
+    if ((end - st) * m > budget) return false;
+    budget -= (end - st) * m;
+    for (let j = 0; j <= m; j++) prev[j] = 0;
+    for (let i = st; i < end; i++) {
+      cur[0] = 0;
+      for (let j = 1; j <= m; j++) {
+        cur[j] = T[i] === qTokens[j - 1] ? prev[j - 1] + 1 : (prev[j] > cur[j - 1] ? prev[j] : cur[j - 1]);
+      }
+      for (let j = 0; j <= m; j++) prev[j] = cur[j];
+      if (prev[m] >= need) return true;
     }
-    return true;
   }
   return false;
 }
 
+function quoteFound(quote, corpus) {
+  let q = decodeEntities(toStr(quote));
+  if (/<[a-zA-Z\/]/.test(q)) q = visibleText(q);
+  q = q.replace(QUOTE_CITATION_RE, ' ');
+  q = normalizeForMatch(q).replace(/^["'\s]+|["'\s]+$/g, '');
+  if (!q) return false;
+  if (corpus.n.indexOf(q) >= 0) return true;
+  const ql = looseNormalize(q);
+  if (ql && corpus.l.indexOf(ql) >= 0) return true;
+  if (/\.\.\./.test(q)) {
+    const parts = q.split(/\.\.\./).map(looseNormalize).filter(Boolean);
+    if (parts.length) {
+      let pos = 0;
+      let all = true;
+      for (const p of parts) {
+        const i = corpus.l.indexOf(p, pos);
+        if (i < 0) { all = false; break; }
+        pos = i + p.length;
+      }
+      if (all) return true;
+    }
+  }
+  return ql ? fuzzyQuoteFound(ql.split(' '), corpus) : false;
+}
+
 /**
- * Keeps only audit issues whose quote really occurs in the edited article's visible text.
- * extra.originalHtml (optional): quotes of "info_lost" issues may also come from the original.
+ * Keeps only audit issues whose quote really occurs in the edited article's visible text (exact after
+ * normalisation, or a close paraphrase). extra.originalHtml (optional): quotes of "info_lost" issues may also
+ * come from the original.
+ * effectiveVerdict never turns the auditor's "fix" into "pass" just because a high issue's quote was not found:
+ * such issues stay blocking and are returned in retryIssues for the retry's Extra instructions.
  */
 function filterAuditIssues(editedHtml, audit, extra) {
   extra = extra || {};
   const parsed = parseAuditReply(audit);
   if (!parsed) {
-    return { verdict: 'reject', effectiveVerdict: 'reject', issues: [], dropped: [], blocking: true, valid: false,
+    return { verdict: 'reject', effectiveVerdict: 'reject', issues: [], dropped: [], retryIssues: [], blocking: true, valid: false,
       error: 'Audit reply is not a valid JSON object.' };
   }
-  const corpus = visibleText(editedHtml) + ' | ' + attributeText(editedHtml);
-  const corpusN = normalizeForMatch(corpus);
-  const corpusL = looseNormalize(corpus);
-  let origN = null;
-  let origL = null;
-  if (extra.originalHtml) {
-    const oc = visibleText(extra.originalHtml);
-    origN = normalizeForMatch(oc);
-    origL = looseNormalize(oc);
-  }
+  const corpus = quoteCorpus(visibleText(editedHtml) + ' | ' + attributeText(editedHtml));
+  const origCorpus = extra.originalHtml ? quoteCorpus(visibleText(extra.originalHtml)) : null;
   const issues = Array.isArray(parsed.issues) ? parsed.issues : [];
   const kept = [];
   const dropped = [];
@@ -2467,19 +2546,27 @@ function filterAuditIssues(editedHtml, audit, extra) {
       sev = 'high';
     }
     issue.severity = sev;
-    let ok = quoteFound(issue.quote, corpusN, corpusL);
-    if (!ok && origN !== null && toStr(issue.category) === 'info_lost') ok = quoteFound(issue.quote, origN, origL);
+    let ok = quoteFound(issue.quote, corpus);
+    if (!ok && origCorpus && toStr(issue.category) === 'info_lost') ok = quoteFound(issue.quote, origCorpus);
     if (ok) kept.push(issue);
     else dropped.push(Object.assign({}, issue, { dropReason: 'quote not found in the edited text' }));
   }
-  const blocking = kept.some(function (i) { return i.severity === 'high'; });
+  const keptHigh = kept.some(function (i) { return i.severity === 'high'; });
+  const droppedHigh = dropped.filter(function (i) { return i && i.severity === 'high' && i.dropReason === 'quote not found in the edited text'; });
   const verdict = toStr(parsed.verdict).trim().toLowerCase();
   let effectiveVerdict;
   if (verdict === 'reject') effectiveVerdict = 'reject';
   else if (verdict !== 'pass' && verdict !== 'fix') effectiveVerdict = 'reject';
-  else effectiveVerdict = blocking ? 'fix' : 'pass';
+  else if (keptHigh) effectiveVerdict = 'fix';
+  else if (verdict === 'fix' && droppedHigh.length) effectiveVerdict = 'fix'; // unmatched quote: never downgraded to pass
+  else effectiveVerdict = 'pass';
+  const rank = { high: 0, medium: 1, low: 2 };
+  const retryIssues = kept.concat(effectiveVerdict === 'fix' ? droppedHigh.map(function (i) {
+    return Object.assign({}, i, { quoteNotFound: true });
+  }) : []).sort(function (a, b) { return (rank[a.severity] || 0) - (rank[b.severity] || 0); });
   const out = Object.assign({}, parsed, {
-    verdict: verdict || parsed.verdict, effectiveVerdict: effectiveVerdict, issues: kept, dropped: dropped, blocking: blocking, valid: true
+    verdict: verdict || parsed.verdict, effectiveVerdict: effectiveVerdict, issues: kept, dropped: dropped,
+    retryIssues: retryIssues, blocking: effectiveVerdict !== 'pass', valid: true
   });
   return out;
 }
@@ -2493,12 +2580,14 @@ async function processEditorOutput(originalHtml, llmText, options) {
   let opts = null;
   const out = {
     action: 'keep_original', html: original, meta: null, errors: [], warnings: [],
-    removedLinks: [], linkResults: [], stats: null, changed: false
+    removedLinks: [], changedLinks: [], linkResults: [], stats: null, changed: false
   };
   try {
     opts = normalizeOptions(options);
+    const originalN = normalizeNewlines(original);
     const parsed = parseEditorOutput(llmText);
     out.meta = parsed.meta;
+    out.warnings = (parsed.warnings || []).slice();
     if (parsed.ok && parsed.status === 'skipped') {
       out.action = 'skip';
       return out;
@@ -2508,35 +2597,71 @@ async function processEditorOutput(originalHtml, llmText, options) {
       return out;
     }
     // Unknown search count + model says it did no research => treat as no research (stricter).
-    if (opts.webSearchCount === null && parsed.meta && parsed.meta.web_research_used === false) opts.webSearchCount = 0;
+    if (opts.webSearchCount === null && parsed.meta && (parsed.meta.web_research_used === false ||
+      /^\s*(?:false|no)\s*$/i.test(toStr(parsed.meta.web_research_used)))) opts.webSearchCount = 0;
 
-    const newLinks = findNewLinks(original, parsed.html, opts);
-    let dead = [];
+    // Own site: required to catch new internal links. Guessed from upload URLs when not given; else fail closed.
+    resolveSiteDomains(opts, originalN);
+    if (!opts.siteDomains.length) {
+      out.errors = [{ code: 'CONFIG_MISSING', message: 'No site domain: set siteDomains (CLI --site) so new internal links can be found.' }];
+      return out;
+    }
+    if (opts.siteDomainsInferred) {
+      out.warnings.push({ code: 'SITE_DOMAINS_INFERRED', message: 'No site domain given; using ' + opts.siteDomains.join(', ') + ' (from the original\'s upload URLs).' });
+    }
+
+    const origHrefs = hrefSet(originalN);
+    const cleaned = stripTrackingParams(originalN, normalizeNewlines(parsed.html), origHrefs);
+    out.changedLinks = cleaned.changed;
+    const editedHtml = cleaned.html;
+    const newLinks = findNewLinks(originalN, editedHtml, opts);
+    const removals = [];
     if (opts.checkLinks) {
       const toCheck = newLinks.filter(function (h) {
         const p = parseUrl(h);
         return p && (p.scheme === 'http' || p.scheme === 'https') && decideNewLink(h, opts, null) === null;
       });
       if (toCheck.length) {
+        const fetchAvailable = typeof opts.fetchFn === 'function' ||
+          (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function');
         try {
           out.linkResults = await checkLinks(toCheck, { fetchFn: opts.fetchFn, timeoutMs: opts.linkTimeoutMs, concurrency: opts.linkConcurrency });
         } catch (e) {
           out.linkResults = toCheck.map(function (u) { return { url: u, status: null, verdict: 'unknown', error: 'link check failed' }; });
         }
-        dead = out.linkResults.filter(function (r) { return r.verdict === 'dead'; }).map(function (r) { return r.url; });
+        const verified = new Set();
+        for (const u of opts.verifiedUrls) { verified.add(u); verified.add(u.replace(/\/+$/, '')); }
+        for (const r of out.linkResults) {
+          const p = parseUrl(r.url);
+          if (r.verdict === 'dead') {
+            removals.push({ url: r.url, reason: 'dead' });
+          } else if (r.verdict === 'ok') {
+            // Redirected to another site (grounding/redirect service, moved or sold domain): the page we'd link is unknown.
+            const f = r.finalUrl ? parseUrl(r.finalUrl) : null;
+            if (p && f && f.validHost && registrableHost(f.host) !== registrableHost(p.host)) removals.push({ url: r.url, reason: 'redirect' });
+          } else if (p && !isBareHomepage(p) && !verified.has(r.url) && !verified.has(r.url.replace(/\/+$/, ''))) {
+            // Could not be checked (no fetch, 401/403/429, timeout): a deep link nobody verified is not published.
+            removals.push({ url: r.url, reason: 'unverified' });
+          }
+        }
+        if (!fetchAvailable) {
+          out.warnings.push({ code: 'LINK_CHECK_UNAVAILABLE', message: 'No fetch function: new links could not be checked; deep links were removed, homepages kept.' });
+        } else if (out.linkResults.length && out.linkResults.every(function (r) { return r.verdict === 'unknown'; })) {
+          out.warnings.push({ code: 'LINK_CHECK_INCONCLUSIVE', message: 'Every new link came back "unknown" (' + short(out.linkResults[0].error, 60) + '): check the network or firewall.' });
+        }
       }
     }
-    const san = sanitizeLinks(original, parsed.html, opts, dead);
+    const san = sanitizeLinks(originalN, editedHtml, opts, removals);
     out.removedLinks = san.removed;
-    const v = validateArticle(original, san.html, Object.assign({}, opts, { meta: parsed.meta, deadUrls: dead }));
+    const v = validateArticle(originalN, san.html, Object.assign({}, opts, { meta: parsed.meta, deadUrls: removals }));
     out.errors = v.errors;
-    out.warnings = v.warnings;
+    out.warnings = out.warnings.concat(v.warnings);
     out.stats = v.stats;
     out.candidateHtml = san.html;
     if (v.pass) {
       out.action = 'publish';
       out.html = san.html;
-      out.changed = san.html !== original;
+      out.changed = san.html !== originalN;
     }
   } catch (e) {
     out.action = 'keep_original';
@@ -2550,11 +2675,12 @@ async function processEditorOutput(originalHtml, llmText, options) {
 /* CLI                                                                  */
 /* ------------------------------------------------------------------ */
 
-const CLI_USAGE = 'Usage: node validate-article.js --original orig.html --output llm-output.txt ' +
-  '[--site a.com,b.com] [--searches N] [--faq auto|no] [--no-link-check] [--write-html out.html] [--report report.json]';
+const CLI_USAGE = 'Usage: node validate-article.js --original orig.html --output llm-output.txt --site a.com,b.com ' +
+  '[--searches N] [--faq auto|no] [--title "Post title"] [--last-checked yes|no|auto] [--today YYYY-MM-DD] ' +
+  '[--no-link-check] [--write-html out.html] [--report report.json]';
 
 function parseCliArgs(argv) {
-  const a = { site: [], searches: null, faq: 'auto', linkCheck: true };
+  const a = { site: [], searches: null, faq: 'auto', linkCheck: true, lastChecked: 'auto' };
   const need = function (i, name) {
     if (i + 1 >= argv.length || /^--/.test(argv[i + 1])) throw new Error('Missing value for ' + name);
     return argv[i + 1];
@@ -2574,6 +2700,17 @@ function parseCliArgs(argv) {
       if (v !== 'auto' && v !== 'no') throw new Error('--faq must be auto or no');
       a.faq = v;
     }
+    else if (k === '--title') { a.title = need(i, k); i++; }
+    else if (k === '--last-checked') {
+      const v = need(i, k).toLowerCase(); i++;
+      if (v !== 'auto' && v !== 'no' && v !== 'yes') throw new Error('--last-checked must be yes, no or auto');
+      a.lastChecked = v;
+    }
+    else if (k === '--today') {
+      const v = need(i, k); i++;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new Error('--today must be YYYY-MM-DD');
+      a.today = v;
+    }
     else if (k === '--no-link-check') a.linkCheck = false;
     else if (k === '--write-html') { a.writeHtml = need(i, k); i++; }
     else if (k === '--report') { a.report = need(i, k); i++; }
@@ -2581,13 +2718,40 @@ function parseCliArgs(argv) {
     else throw new Error('Unknown argument: ' + k);
   }
   if (!a.help && (!a.original || !a.output)) throw new Error('--original and --output are required');
+  if (!a.help && !a.site.length) throw new Error('--site is required (your own domain, e.g. --site tubetyre.com)');
   return a;
+}
+
+/** Output files named on the command line (read even when the rest of the arguments are invalid). */
+function cliOutputTargets(argv) {
+  const t = { files: [], inputs: [] };
+  for (let i = 0; i + 1 < argv.length; i++) {
+    const v = argv[i + 1];
+    if (/^--/.test(v)) continue;
+    if (argv[i] === '--write-html' || argv[i] === '--report') t.files.push(v);
+    if (argv[i] === '--original' || argv[i] === '--output') t.inputs.push(v);
+  }
+  return t;
 }
 
 async function runCli(argv) {
   const fs = require('fs');
+  const path = require('path');
+  // Delete the --write-html / --report files of an earlier run FIRST, whatever happens next (usage error,
+  // unreadable input, keep_original), so a stale final.html can never be uploaded. Inputs are never deleted.
+  const targets = cliOutputTargets(argv);
+  const inputs = targets.inputs.map(function (f) { return path.resolve(f); });
+  let clash = false;
+  for (const f of targets.files) {
+    if (inputs.indexOf(path.resolve(f)) >= 0) { clash = true; continue; }
+    try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {
+      process.stderr.write('Cannot delete old output file ' + f + ': ' + e.message + '\n');
+      return 1;
+    }
+  }
   let args;
   try {
+    if (clash) throw new Error('--write-html and --report must not be the same file as --original or --output');
     args = parseCliArgs(argv);
   } catch (e) {
     process.stderr.write(e.message + '\n' + CLI_USAGE + '\n');
@@ -2607,16 +2771,17 @@ async function runCli(argv) {
     siteDomains: args.site,
     webSearchCount: args.searches,
     allowNewFaq: args.faq !== 'no',
+    postTitle: args.title || '',
+    lastCheckedLine: args.lastChecked,
+    today: args.today || '',
     checkLinks: args.linkCheck
   });
   const code = result.action === 'publish' ? 0 : (result.action === 'skip' ? 3 : 2);
   try {
-    if (args.writeHtml) {
-      if (result.action === 'publish') fs.writeFileSync(args.writeHtml, result.html, 'utf8');
-      else if (fs.existsSync(args.writeHtml)) fs.unlinkSync(args.writeHtml); // never leave a stale file to upload
-    }
+    if (args.writeHtml && result.action === 'publish') fs.writeFileSync(args.writeHtml, result.html, 'utf8');
     if (args.report) fs.writeFileSync(args.report, JSON.stringify(result, null, 2), 'utf8');
   } catch (e) {
+    try { if (args.writeHtml && fs.existsSync(args.writeHtml)) fs.unlinkSync(args.writeHtml); } catch (e2) { /* ignore */ }
     process.stderr.write('Cannot write output: ' + e.message + '\n');
     return 1;
   }
@@ -2646,11 +2811,14 @@ if (typeof module !== 'undefined' && module && module.exports) {
     ERROR_CODES: ERROR_CODES,
     WARNING_CODES: WARNING_CODES,
     DEFAULT_FORBIDDEN_LINK_DOMAINS: DEFAULT_FORBIDDEN_LINK_DOMAINS,
+    REDIRECT_LINK_DOMAINS: REDIRECT_LINK_DOMAINS,
     BOX_TYPES: BOX_TYPES,
     _internal: {
       visibleText: visibleText, countWords: countWords, decodeEntities: decodeEntities, normalizeOptions: normalizeOptions,
       parseUrl: parseUrl, decideNewLink: decideNewLink, findSourcesSections: findSourcesSections, leadingItem: leadingItem,
-      blockTokens: blockTokens, normalizeForMatch: normalizeForMatch, classifyFetchError: classifyFetchError
+      blockTokens: blockTokens, normalizeForMatch: normalizeForMatch, classifyFetchError: classifyFetchError,
+      registrableHost: registrableHost, inferSiteDomains: inferSiteDomains, stripTrackingParamsFromUrl: stripTrackingParamsFromUrl,
+      bareTextSegments: bareTextSegments, figureInfo: figureInfo, markupOf: markupOf
     }
   };
 }

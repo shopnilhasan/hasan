@@ -154,8 +154,8 @@ test('PARSE_MISSING_MARKER: missing END (truncated), missing META, missing start
   expectError(V.parseEditorOutput(null), 'PARSE_MISSING_MARKER');
 });
 
-test('PARSE_META_JSON: invalid JSON, missing status, wrong status, JSON array', () => {
-  expectError(V.parseEditorOutput('<<<ARTICLE_HTML>>>\n<p>x</p>\n<<<META_JSON>>>\n{"status": "edited",, }\n<<<END>>>'), 'PARSE_META_JSON');
+test('PARSE_META_JSON: invalid JSON without a readable status, missing status, wrong status, JSON array', () => {
+  expectError(V.parseEditorOutput('<<<ARTICLE_HTML>>>\n<p>x</p>\n<<<META_JSON>>>\n{"stat": "edited",, }\n<<<END>>>'), 'PARSE_META_JSON');
   expectError(V.parseEditorOutput('<<<ARTICLE_HTML>>>\n<p>x</p>\n<<<META_JSON>>>\n{"language": "en"}\n<<<END>>>'), 'PARSE_META_JSON');
   expectError(V.parseEditorOutput('<<<ARTICLE_HTML>>>\n<p>x</p>\n<<<META_JSON>>>\n{"status": "done"}\n<<<END>>>'), 'PARSE_META_JSON');
   expectError(V.parseEditorOutput('<<<ARTICLE_HTML>>>\n<p>x</p>\n<<<META_JSON>>>\n[1,2]\n<<<END>>>'), 'PARSE_META_JSON');
@@ -337,12 +337,14 @@ test('HEADING_ORDER: h2 -> h4 jump, first heading h3', () => {
   expectError(validate(replaceOnce(GOOD, h, '<h4 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h4>')), 'HEADING_ORDER');
   const first = '<h2 class="wp-block-heading" id="why-tyre-pressure-matters">Why Does Tyre Pressure Matter?</h2>';
   expectError(validate(replaceOnce(GOOD, first, '<h3 class="wp-block-heading" id="why-tyre-pressure-matters">Why Does Tyre Pressure Matter?</h3>')), 'HEADING_ORDER');
-  // h2 -> h3 -> h2 is fine; headings inside plugin blocks (TOC h2) are ignored
-  assert.equal(validate(replaceOnce(GOOD, h, '<h3 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h3>')).pass, true);
+  // h2 -> h3 -> h2 is fine (with the matching block comment); headings inside plugin blocks (TOC h2) are ignored
+  const toH3 = replaceOnce(GOOD, '<!-- wp:heading -->\n' + h, '<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h3>');
+  const r3 = validate(toH3);
+  assert.equal(r3.pass, true, JSON.stringify(r3.errors));
 });
 
-test('PLACEHOLDER: [VERIFY], {{...}}, TODO, href="#", example.com', () => {
-  const r = validate(insertBeforeSnippet(GOOD, para('Prices start at [VERIFY: price] and {{ANSWER}} TODO see <a href="#">here</a> or example.com.')));
+test('PLACEHOLDER: [VERIFY], {{...}}, TODO:, href="#", example.com', () => {
+  const r = validate(insertBeforeSnippet(GOOD, para('Prices start at [VERIFY: price] and {{ANSWER}} TODO: see <a href="#">here</a> or example.com.')));
   expectError(r, 'PLACEHOLDER');
   const msg = r.errors.find((e) => e.code === 'PLACEHOLDER').message;
   for (const k of ['[VERIFY', '{{', 'TODO', 'href="#"', 'example.com']) assert.ok(msg.includes(k), msg);
@@ -732,21 +734,29 @@ test('filterAuditIssues: keeps real quotes (entities, tags, curly quotes, dashes
   assert.equal(r.valid, true);
 });
 
-test('filterAuditIssues: blocking recomputed after dropping invented high issues; string input with fence', () => {
+test('filterAuditIssues: a "fix" whose high quote is not found stays "fix" (never downgraded to pass); string input with fence', () => {
   const text = '```json\n' + JSON.stringify({ verdict: 'fix', issues: [
     { severity: 'high', category: 'fact_wrong', quote: 'The tyres must be inflated to 50 psi at all times', problem: 'p', fix: 'f' },
     { severity: 'low', category: 'x', quote: 'before you drive', problem: 'p', fix: 'f' }
   ] }) + '\n```';
   const r = V.filterAuditIssues(AUDIT_HTML, text);
-  assert.equal(r.blocking, false);
-  assert.equal(r.effectiveVerdict, 'pass');
   assert.equal(r.verdict, 'fix');
+  assert.equal(r.effectiveVerdict, 'fix');
+  assert.equal(r.blocking, true);
   assert.equal(r.issues.length, 1);
+  assert.equal(r.dropped.length, 1);
+  // the unmatched high issue goes into the retry's Extra instructions, first
+  assert.deepEqual(r.retryIssues.map((i) => [i.severity, !!i.quoteNotFound]), [['high', true], ['low', false]]);
+  // the same invented high issue with an auditor verdict "pass": dropped, pass
+  const r2 = V.filterAuditIssues(AUDIT_HTML, { verdict: 'pass', issues: [{ severity: 'high', quote: 'The tyres must be inflated to 50 psi at all times' }] });
+  assert.equal(r2.effectiveVerdict, 'pass');
+  assert.equal(r2.blocking, false);
 });
 
 test('filterAuditIssues: reject stays reject; invalid audit fails closed; unknown severity counts as high', () => {
   let r = V.filterAuditIssues(AUDIT_HTML, { verdict: 'reject', issues: [] });
   assert.equal(r.effectiveVerdict, 'reject');
+  assert.equal(r.blocking, true);
   r = V.filterAuditIssues(AUDIT_HTML, 'not json at all');
   assert.equal(r.valid, false);
   assert.equal(r.blocking, true);
@@ -857,24 +867,82 @@ test('CLI: exit 0 publish (writes html and report), 2 keep_original (removes sta
 
     const bad = path.join(dir, 'bad.txt');
     fs.writeFileSync(bad, GOOD_TEXT.replace('<<<END>>>', ''));
-    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', bad, '--no-link-check', '--write-html', out]);
+    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', bad, '--site', 'tubetyre.com', '--no-link-check', '--write-html', out]);
     assert.equal(r.status, 2, r.stderr);
     assert.equal(JSON.parse(r.stdout).action, 'keep_original');
     assert.equal(fs.existsSync(out), false, 'stale output file must be removed');
 
     const skip = path.join(dir, 'skip.txt');
     fs.writeFileSync(skip, '<<<ARTICLE_HTML>>>\n<<<META_JSON>>>\n{"status":"skipped"}\n<<<END>>>');
-    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', skip, '--no-link-check']);
+    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', skip, '--site', 'tubetyre.com', '--no-link-check']);
     assert.equal(r.status, 3, r.stderr);
 
     r = cli(['--original', path.join(FIX, 'original-block.html')]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /Usage/);
-    r = cli(['--original', path.join(dir, 'missing.html'), '--output', skip]);
+    r = cli(['--original', path.join(dir, 'missing.html'), '--output', skip, '--site', 'tubetyre.com']);
     assert.equal(r.status, 1);
-    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', skip, '--searches', 'many']);
+    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', skip, '--site', 'tubetyre.com', '--searches', 'many']);
     assert.equal(r.status, 1);
     r = cli(['--bogus']);
+    assert.equal(r.status, 1);
+    // --site is required (a missing own-domain setting would let new internal links through)
+    r = cli(['--original', path.join(FIX, 'original-block.html'), '--output', path.join(FIX, 'edited-good.txt'), '--no-link-check']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /--site is required/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: an old --write-html / --report file is deleted even when the run ends with exit 1', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'va-cli-'));
+  try {
+    const out = path.join(dir, 'final.html');
+    const rep = path.join(dir, 'report.json');
+    const stale = () => { fs.writeFileSync(out, 'STALE FROM FIRST ATTEMPT'); fs.writeFileSync(rep, '{"action":"publish"}'); };
+    const cases = [
+      ['--original', path.join(FIX, 'original-block.html'), '--output', path.join(dir, 'does-not-exist.txt'), '--site', 'tubetyre.com'],
+      ['--original', path.join(FIX, 'original-block.html'), '--output', path.join(FIX, 'edited-good.txt'), '--site', 'tubetyre.com', '--searches', 'abc'],
+      ['--original', path.join(FIX, 'original-block.html'), '--output', path.join(FIX, 'edited-good.txt')]
+    ];
+    for (const c of cases) {
+      stale();
+      const r = cli(c.concat(['--write-html', out, '--report', rep]));
+      assert.equal(r.status, 1, r.stderr);
+      assert.equal(fs.existsSync(out), false, 'stale html must be gone: ' + c.join(' '));
+      assert.equal(fs.existsSync(rep), false, 'stale report must be gone: ' + c.join(' '));
+    }
+    // an output path equal to an input path is refused and the input is NOT deleted
+    const orig = path.join(dir, 'original.html');
+    fs.copyFileSync(path.join(FIX, 'original-block.html'), orig);
+    const r = cli(['--original', orig, '--output', path.join(FIX, 'edited-good.txt'), '--site', 'tubetyre.com', '--write-html', orig]);
+    assert.equal(r.status, 1);
+    assert.equal(fs.readFileSync(orig, 'utf8'), ORIG);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI: --title, --last-checked no and --today reach the checks', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'va-cli-'));
+  try {
+    const base = ['--original', path.join(FIX, 'original-block.html'), '--site', 'tubetyre.com', '--no-link-check'];
+    const titled = path.join(dir, 'titled.txt');
+    fs.writeFileSync(titled, wrapOutput(para('How to Check Tyre Pressure at Home') + '\n' + GOOD));
+    let r = cli(base.concat(['--output', titled, '--title', 'How to Check Tyre Pressure at Home']));
+    assert.equal(r.status, 2, r.stdout);
+    assert.ok(JSON.parse(r.stdout).errors.some((e) => e.code === 'TITLE_IN_BODY'));
+    const checked = path.join(dir, 'checked.txt');
+    fs.writeFileSync(checked, wrapOutput(replaceOnce(GOOD, QA_BOX_START, para('<em>Last checked: 2026-09-27. Dates and figures were verified against official sources.</em>') + '\n\n' + QA_BOX_START)));
+    r = cli(base.concat(['--output', checked, '--searches', '6']));
+    assert.equal(r.status, 0, r.stdout);
+    r = cli(base.concat(['--output', checked, '--searches', '6', '--last-checked', 'no']));
+    assert.equal(r.status, 2);
+    assert.ok(JSON.parse(r.stdout).errors.some((e) => e.code === 'LAST_CHECKED_NOT_ALLOWED'));
+    r = cli(base.concat(['--output', checked, '--searches', '0', '--today', '2026-09-27']));
+    assert.equal(r.status, 2);
+    r = cli(base.concat(['--output', checked, '--today', '27.09.2026']));
     assert.equal(r.status, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -885,6 +953,464 @@ test('CLI: classic fixture publishes', () => {
   const r = cli(['--original', path.join(FIX, 'original-classic.html'), '--output', path.join(FIX, 'edited-classic-good.txt'),
     '--site', 'getcostidea.com', '--searches', '0', '--no-link-check']);
   assert.equal(r.status, 0, r.stdout + r.stderr);
+});
+
+// ---------------------------------------------------------------------------------------------
+// review round 2: regression tests (each one failed or false-failed before the fix)
+// ---------------------------------------------------------------------------------------------
+function expectKeep(r, code) {
+  assert.equal(r.action, 'keep_original', 'expected keep_original, got ' + r.action + ': ' + JSON.stringify(r.errors));
+  expectError({ errors: r.errors, pass: false }, code);
+}
+const NOFETCH = { checkLinks: false };
+const P = (t) => '<p>' + t + '</p>';
+
+test('STRAY_TEXT: chat text around a block-editor article (before, after, between blocks) is not published', async () => {
+  for (const lead of ['Here is the complete edited article:\n', 'FIXED ARTICLE HTML\n', 'html\n']) {
+    const r = await V.processEditorOutput(ORIG, wrapOutput(lead + GOOD), Object.assign({}, OPTS, NOFETCH));
+    expectKeep(r, 'STRAY_TEXT');
+  }
+  const tail = await V.processEditorOutput(ORIG, wrapOutput(GOOD + '\nI kept all images and links unchanged. Let me know if you need changes!'), Object.assign({}, OPTS, NOFETCH));
+  expectKeep(tail, 'STRAY_TEXT');
+  expectError(validate(insertBeforeSnippet(GOOD, 'Note: this section was rewritten for clarity.')), 'STRAY_TEXT');
+  // chat inside a normal paragraph at the end
+  expectError(validate(GOOD + '\n' + para('Hope this helps! Let me know if you would like any further changes.')), 'STRAY_TEXT');
+});
+
+test('STRAY_TEXT: classic articles with bare-text paragraphs flag only chat-like lines (no false fail on normal bare text)', () => {
+  const opts = Object.assign({}, OPTS_C, { allowNewFaq: false });
+  expectError(V.validateArticle(ORIG_C, 'Here is the edited article:\n\n' + GOOD_C, opts), 'STRAY_TEXT');
+  expectError(V.validateArticle(ORIG_C, GOOD_C + '\n\nI kept all images, links and shortcodes unchanged.', opts), 'STRAY_TEXT');
+  const normal = replaceOnce(GOOD_C, '<h2>Should You Paint', 'Most painters charge extra for high ceilings and detailed trim work.\n\n<h2>Should You Paint');
+  const r = V.validateArticle(ORIG_C, normal, opts);
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
+  // a normal intro that happens to start with "Here's the complete guide" is not chat
+  const intro = replaceOnce(GOOD, '<p>Knowing how to check tyre pressure at home saves fuel', '<p>Here' + "'" + 's the complete guide to checking tyre pressure at home. It saves fuel');
+  assert.equal(validate(intro).pass, true);
+});
+
+test('MARKDOWN: markdown and search-tool citation marks are not published; code samples are ignored', () => {
+  const cases = ['**Tip:** check them cold.', 'See [NHTSA](https://www.nhtsa.gov/) first.',
+    'The load index is 91 ([michelin.com](https://www.michelin.com/en/tyres?utm_source=openai)).',
+    'Pressure drops in winter 【3†source】.', 'Pressure drops in winter [cite: 1].', 'Pressure drops in winter [1].'];
+  for (const c of cases) expectError(validate(insertBeforeSnippet(GOOD, para(c))), 'MARKDOWN');
+  expectError(validate(insertBeforeSnippet(GOOD, '\n## Extra heading\n')), 'MARKDOWN');
+  assert.equal(validate(insertBeforeSnippet(GOOD, para('Type <code>**bold**</code> in a markdown editor to get bold text today.'))).pass, true);
+});
+
+test('sanitizeLinks: tracking parameters (utm_source=openai, gclid...) are removed from new links only', async () => {
+  const e = sEdited('See <a href="https://www.who.int/news/item/1?utm_source=openai&amp;id=7">WHO</a> and <a href="https://www.cdc.gov/?gclid=x">CDC</a>.');
+  const r = V.sanitizeLinks(S_ORIG, e, {});
+  assert.ok(r.html.includes('<a href="https://www.who.int/news/item/1?id=7">WHO</a>'), r.html);
+  assert.ok(r.html.includes('<a href="https://www.cdc.gov/">CDC</a>'), r.html);
+  assert.deepEqual(r.changed.map((c) => c.to), ['https://www.who.int/news/item/1?id=7', 'https://www.cdc.gov/']);
+  // an original link with a utm parameter is never touched
+  const o = para('Old <a href="https://www.who.int/?utm_source=old">WHO</a> link text here.');
+  assert.equal(V.sanitizeLinks(o, o, {}).html, o);
+  // processEditorOutput checks the cleaned URL
+  const calls = [];
+  const html = replaceAll(GOOD, 'https://www.tyresafe.org/', 'https://www.tyresafe.org/?utm_source=openai');
+  const p = await V.processEditorOutput(ORIG, wrapOutput(html), Object.assign({}, OPTS, { fetchFn: makeFetch({}, calls) }));
+  assert.equal(p.action, 'publish', JSON.stringify(p.errors));
+  assert.equal(p.html, GOOD);
+  assert.deepEqual(calls, [['HEAD', 'https://www.tyresafe.org/']]);
+});
+
+test('redirect links: grounding/short/search redirects and cross-site redirects are unwrapped', async () => {
+  const e = sEdited('<a href="https://vertexaisearch.cloud.google.com/grounding-api-redirect/AbF9">guide</a>, <a href="https://bit.ly/x1">short</a>, ' +
+    '<a href="https://www.google.com/url?q=https://www.who.int/">g</a>, <a href="https://t.co/abc">t</a>.');
+  const r = V.sanitizeLinks(S_ORIG, e, { forbiddenLinkDomains: ['spam.biz'] });
+  assert.ok(r.html.includes('guide, short, g, t.'), r.html);
+  assert.deepEqual(r.removed.map((x) => x.reason), ['redirect', 'redirect', 'redirect', 'redirect']);
+  // a new link whose fetch ends on another site is unwrapped; www/https redirects on the same site are fine
+  const html = insertBeforeSnippet(GOOD, para('Data from <a href="https://www.brand-a.org/report">the report</a>.'));
+  const fetchFn = makeFetch({
+    'https://www.brand-a.org/report': () => ({ status: 200, url: 'https://final.example.net/page' }),
+    'https://www.tyresafe.org/': () => ({ status: 200, url: 'https://tyresafe.org/' })
+  });
+  const p = await V.processEditorOutput(ORIG, wrapOutput(html), Object.assign({}, OPTS, { fetchFn }));
+  assert.equal(p.action, 'publish', JSON.stringify(p.errors));
+  assert.ok(!p.html.includes('brand-a.org') && p.html.includes('Data from the report.'));
+  assert.ok(p.html.includes('https://www.tyresafe.org/'));
+  assert.deepEqual(p.removedLinks, [{ url: 'https://www.brand-a.org/report', reason: 'redirect' }]);
+});
+
+test('checkLinks: soft 404 (deep URL redirected to the homepage) and parked domains are dead', async () => {
+  let r = await V.checkLinks(['https://www.who.int/made-up-page'], { fetchFn: async () => ({ status: 200, url: 'https://www.who.int/' }) });
+  assert.equal(r[0].verdict, 'dead');
+  assert.match(r[0].error, /soft 404/);
+  r = await V.checkLinks(['https://www.example-brand.com/p/x'], { fetchFn: async () => ({ status: 200, url: 'https://www.hugedomains.com/domain_profile.cfm?d=example-brand.com' }) });
+  assert.equal(r[0].verdict, 'dead');
+  // homepage to homepage and same-page redirects stay ok
+  r = await V.checkLinks(['https://who.int/', 'https://www.who.int/a'], { fetchFn: async (u) => ({ status: 200, url: u === 'https://who.int/' ? 'https://www.who.int/' : 'https://www.who.int/a/' }) });
+  assert.deepEqual(r.map((x) => x.verdict), ['ok', 'ok']);
+});
+
+test('checkLinks: n8n-style { statusCode } results and axios-style thrown errors are read', async () => {
+  let r = await V.checkLinks(['https://www.who.int/x'], { fetchFn: async () => ({ statusCode: 404 }) });
+  assert.equal(r[0].verdict, 'dead');
+  r = await V.checkLinks(['https://www.who.int/x'], { fetchFn: async () => { const e = new Error('Request failed with status code 404'); e.response = { status: 404 }; throw e; } });
+  assert.equal(r[0].verdict, 'dead');
+  r = await V.checkLinks(['https://www.who.int/y'], { fetchFn: async () => ({ statusCode: 200 }) });
+  assert.equal(r[0].verdict, 'ok');
+});
+
+test('link checks fail closed: no fetch => LINK_CHECK_UNAVAILABLE, deep links unwrapped, homepages kept', async () => {
+  const html = insertBeforeSnippet(GOOD, para('See <a href="https://www.who.int/invented/page">WHO</a>.'));
+  const saved = globalThis.fetch;
+  let r;
+  try {
+    globalThis.fetch = undefined;
+    r = await V.processEditorOutput(ORIG, wrapOutput(html), Object.assign({}, OPTS, { webSearchCount: 3 }));
+  } finally {
+    globalThis.fetch = saved;
+  }
+  assert.equal(r.action, 'publish', JSON.stringify(r.errors));
+  expectWarning(r, 'LINK_CHECK_UNAVAILABLE');
+  assert.ok(!r.html.includes('invented/page'));
+  assert.ok(r.html.includes('https://www.tyresafe.org/'));
+  assert.deepEqual(r.removedLinks.map((x) => x.reason), ['unverified']);
+});
+
+test('link checks fail closed: 403/401/429 deep links are unwrapped unless in verifiedUrls; all-unknown => LINK_CHECK_INCONCLUSIVE', async () => {
+  const deep = 'https://www.tyresafe.org/tyre-pressure/';
+  const html = replaceAll(GOOD, 'https://www.tyresafe.org/', deep);
+  const fetchFn = async () => ({ status: 403 });
+  let r = await V.processEditorOutput(ORIG, wrapOutput(html), Object.assign({}, OPTS, { fetchFn }));
+  assert.equal(r.action, 'publish', JSON.stringify(r.errors));
+  assert.ok(!r.html.includes(deep));
+  expectWarning(r, 'LINK_CHECK_INCONCLUSIVE');
+  r = await V.processEditorOutput(ORIG, wrapOutput(html), Object.assign({}, OPTS, { fetchFn, verifiedUrls: [deep] }));
+  assert.ok(r.html.includes(deep));
+  // a 403 homepage stays
+  r = await V.processEditorOutput(ORIG, GOOD_TEXT, Object.assign({}, OPTS, { fetchFn }));
+  assert.ok(r.html.includes('https://www.tyresafe.org/'));
+});
+
+test('CONFIG_MISSING / SITE_DOMAINS_INFERRED: no site domain => guessed from upload URLs, else keep original', async () => {
+  const html = insertBeforeSnippet(GOOD, para('Read <a href="https://tubetyre.com/new-guide/">our new guide</a>.'));
+  let r = await V.processEditorOutput(ORIG, wrapOutput(html), NOFETCH);
+  assert.equal(r.action, 'publish', JSON.stringify(r.errors));
+  expectWarning(r, 'SITE_DOMAINS_INFERRED');
+  assert.ok(r.html.includes('Read our new guide.'));
+  // validateArticle alone also infers it (defence in depth)
+  expectError(V.validateArticle(ORIG, html, {}), 'NEW_INTERNAL_LINK');
+  // nothing to infer from: fail closed
+  r = await V.processEditorOutput(S_ORIG, wrapOutput(S_ORIG + '\n' + para('More text.')), NOFETCH);
+  expectKeep(r, 'CONFIG_MISSING');
+  assert.deepEqual(V._internal.inferSiteDomains('<img src="https://i0.wp.com/tubetyre.com/wp-content/uploads/a.jpg"><img src="https://cdn.getcostidea.com/wp-content/uploads/b.jpg">'), ['tubetyre.com', 'getcostidea.com']);
+});
+
+test('filterAuditIssues: lightly paraphrased quotes and quotes with citation marks are matched (the issue keeps blocking)', () => {
+  const art = '<p>Most passenger car tyres should be replaced after six years, whatever the tread depth.</p>';
+  let r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', category: 'new_claim_unverified', quote: 'passenger tyres should be replaced after six years regardless of tread depth', problem: 'p', fix: 'f' }] });
+  assert.equal(r.issues.length, 1);
+  assert.equal(r.effectiveVerdict, 'fix');
+  r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', quote: 'Most passenger car tyres should be replaced after six years, whatever the tread depth. [1]' }] });
+  assert.equal(r.issues.length, 1);
+  r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', quote: 'passenger car tyres should be replaced after six years 【1†source】' }] });
+  assert.equal(r.issues.length, 1);
+  // one word off in a longer quote
+  r = V.filterAuditIssues(AUDIT_HTML, { verdict: 'fix', issues: [{ severity: 'high', quote: 'Most cars need between 30 and 36 psi, as the door sticker shows' }] });
+  assert.equal(r.issues.length, 1);
+  // unrelated words are still dropped
+  r = V.filterAuditIssues(AUDIT_HTML, { verdict: 'pass', issues: [{ severity: 'high', quote: 'nitrogen inflation always improves fuel economy by ten percent' }] });
+  assert.equal(r.issues.length, 0);
+});
+
+test('ID_MISSING / FORBIDDEN_TAG: the title H1 (with an id) after a leading image may be deleted', () => {
+  const body = para('Intro text about the best tyres for most drivers this year and why they matter.') +
+    '\n<!-- wp:heading -->\n<h2 class="wp-block-heading">Section one</h2>\n<!-- /wp:heading -->\n' + para('Body text for section one with enough words to be counted.');
+  const img = '<!-- wp:image {"id":7} -->\n<figure class="wp-block-image"><img src="https://tubetyre.com/wp-content/uploads/a.jpg" alt=""/></figure>\n<!-- /wp:image -->\n';
+  const o = img + '<!-- wp:heading {"level":1} -->\n<h1 class="wp-block-heading" id="h-title">Best Tyres 2026</h1>\n<!-- /wp:heading -->\n' + body;
+  const e = img.replace('alt=""', 'alt="A car tyre"') + body;
+  const r = V.validateArticle(o, e, OPTS);
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
+  // keeping the title H1 (or adding another) still fails
+  expectError(V.validateArticle(o, o, OPTS), 'FORBIDDEN_TAG');
+});
+
+test('PLACEHOLDER: leftover {{...}} or an empty answer inside the FAQ JSON-LD', () => {
+  expectError(validate(insertBeforeSnippet(GOOD, NEW_FAQ.replace('"text":"Use the pressure on your door sticker."', '"text":"{{ANSWER}}"'))), 'PLACEHOLDER');
+  expectError(validate(insertBeforeSnippet(GOOD, NEW_FAQ.replace('"text":"Use the pressure on your door sticker."', '"text":""'))), 'PLACEHOLDER');
+});
+
+test('META_JSON_INVALID: an unescaped quote in META does not throw away a good article (status read, research treated as none)', async () => {
+  const badMeta = '<<<ARTICLE_HTML>>>\n' + GOOD + '\n<<<META_JSON>>>\n{"status": "edited", "unverified_kept": ["fits 17" wheels"], "web_research_used": true}\n<<<END>>>';
+  const p = V.parseEditorOutput(badMeta);
+  assert.equal(p.ok, true);
+  assert.equal(p.meta.web_research_used, false);
+  expectWarning(p, 'META_JSON_INVALID');
+  const r = await V.processEditorOutput(ORIG, badMeta, Object.assign({}, OPTS, NOFETCH));
+  assert.equal(r.action, 'publish', JSON.stringify(r.errors));
+  expectWarning(r, 'META_JSON_INVALID');
+  // skipped with broken META is still a skip
+  const s = await V.processEditorOutput(ORIG, '<<<ARTICLE_HTML>>>\n<<<META_JSON>>>\n{"status": "skipped", "skip_reason": "a "quoted" thing"}\n<<<END>>>', OPTS);
+  assert.equal(s.action, 'skip');
+});
+
+function dropSection(html, headText) {
+  const i = html.indexOf(headText);
+  const s = html.lastIndexOf('<!-- wp:heading -->', i);
+  const e = html.indexOf('<!-- wp:heading -->', i + 10);
+  return html.slice(0, s) + html.slice(e);
+}
+
+test('OMISSION_MARKER: "rest of the article unchanged" notes (text or comment) instead of content', () => {
+  const cut = GOOD.indexOf('<!-- wp:heading -->\n<h2 class="wp-block-heading">What Are the Most Common Mistakes?');
+  const src = GOOD.indexOf('<!-- wp:heading -->\n<h2 class="wp-block-heading">Sources</h2>');
+  expectError(validate(GOOD.slice(0, cut) + para('The rest of the article is unchanged.') + '\n\n' + GOOD.slice(src)), 'OMISSION_MARKER');
+  expectError(validate(GOOD.slice(0, cut) + '<!-- rest of article unchanged -->\n\n' + GOOD.slice(src)), 'OMISSION_MARKER');
+  expectError(validate(GOOD.slice(0, cut) + para('[...]') + '\n\n' + GOOD.slice(src)), 'OMISSION_MARKER');
+  // a normal sentence about unchanged prices is fine
+  assert.equal(validate(insertBeforeSnippet(GOOD, para('The recommended pressure for most cars has stayed the same for years.'))).pass, true);
+});
+
+test('NEW_HTML_COMMENT (warning): a new plain HTML comment is logged; block comments are not', () => {
+  const r = V.validateArticle(ORIG_C, replaceOnce(GOOD_C, '<h2>Should You Paint', '<!-- note: prices unverified -->\n<h2>Should You Paint'), OPTS_C);
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
+  expectWarning(r, 'NEW_HTML_COMMENT');
+  assert.ok(!codes(validate(GOOD).warnings).includes('NEW_HTML_COMMENT'));
+});
+
+test('CONTENT_RETENTION: whole sections deleted and hidden by new text are caught', () => {
+  let h = dropSection(GOOD, 'What Are the Most Common Mistakes?');
+  h = dropSection(h, 'Where Do You Find the Right Tyre Pressure?');
+  h = insertBeforeSnippet(h, para('Our guide on <a href="https://tubetyre.com/tyre-sidewall-markings/">sidewall markings</a> helps. ' + uniqueWords(160, 'pad')));
+  const r = validate(h);
+  expectError(r, 'CONTENT_RETENTION');
+  assert.ok(!codes(r.errors).includes('CONTENT_LOSS'), 'the word count alone does not catch it');
+  assert.ok(!codes(validate(GOOD).errors).includes('CONTENT_RETENTION'));
+});
+
+test('MALFORMED_COMMENT / FORBIDDEN_TAG: unclosed comment, unclosed script, raw-text and base tags', () => {
+  const i = GOOD.indexOf('<!-- wp:heading -->\n<h2 class="wp-block-heading">Where Do You Find');
+  expectError(validate(GOOD.slice(0, i) + '<!-- ' + GOOD.slice(i)), 'MALFORMED_COMMENT');
+  const mid = GOOD_C.indexOf('<h2>Should You Paint');
+  expectError(V.validateArticle(ORIG_C, GOOD_C.slice(0, mid) + '<!-- ' + GOOD_C.slice(mid), OPTS_C), 'MALFORMED_COMMENT');
+  expectError(validate(GOOD + '\n<script src="https://evil.test/x.js">'), 'FORBIDDEN_TAG');
+  expectError(validate(insertBeforeSnippet(GOOD, '<script src="https://evil.test/x.js">')), 'FORBIDDEN_TAG');
+  expectError(V.validateArticle(ORIG_C, GOOD_C.slice(0, mid) + '<textarea>' + GOOD_C.slice(mid), OPTS_C), 'FORBIDDEN_TAG');
+  expectError(validate(insertBeforeSnippet(GOOD, '<base href="https://evil.test/">')), 'FORBIDDEN_TAG');
+  // a new FAQPage JSON-LD script is still allowed
+  assert.equal(validate(insertBeforeSnippet(GOOD, NEW_FAQ)).pass, true);
+});
+
+const PIC_O = para('Intro text for the picture test that is long enough to count.') + '\n<!-- wp:html --><picture><source srcset="https://tubetyre.com/a.webp" type="image/webp"><img src="https://tubetyre.com/a.jpg" alt="a" width="10" height="10"></picture>' +
+  '<iframe src="https://www.youtube.com/embed/REALID" width="560" height="315"></iframe><ins class="adsbygoogle" data-ad-client="ca-pub-1111" data-ad-slot="2222"></ins><!-- /wp:html -->\n' +
+  para('More words here so that the ratio is fine and nothing else fails at all.');
+
+test('MEDIA_CHANGED: <source srcset>, <iframe src> and ad <ins> attributes must stay exactly the same', () => {
+  expectError(V.validateArticle(PIC_O, PIC_O.replace('https://tubetyre.com/a.webp', 'https://tubetyre.com/OTHER.webp'), OPTS), 'MEDIA_CHANGED');
+  expectError(V.validateArticle(PIC_O, PIC_O.replace('REALID', 'HALLUCINATED'), OPTS), 'MEDIA_CHANGED');
+  expectError(V.validateArticle(PIC_O, PIC_O.replace('data-ad-slot="2222"', 'data-ad-slot="9999"'), OPTS), 'MEDIA_CHANGED');
+  assert.equal(V.validateArticle(PIC_O, PIC_O.replace('alt="a"', 'alt="A tyre"'), OPTS).pass, true);
+});
+
+test('EMBED_URL_MISSING: a classic auto-embed URL line must stay on its own line; wp:embed wrapper URL too', () => {
+  const yt = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  const o = replaceOnce(ORIG_C, '<h2>DIY vs Hiring a Painter</h2>', yt + '\n\n<h2>DIY vs Hiring a Painter</h2>');
+  const keep = replaceOnce(GOOD_C, '<h2>Should You Paint', yt + '\n\n<h2>Should You Paint');
+  assert.equal(V.validateArticle(o, keep, OPTS_C).pass, true);
+  assert.equal(V.validateArticle(o, replaceOnce(GOOD_C, '<h2>Should You Paint', '<p>' + yt + '</p>\n<h2>Should You Paint'), OPTS_C).pass, true);
+  expectError(V.validateArticle(o, GOOD_C, OPTS_C), 'EMBED_URL_MISSING');
+  expectError(V.validateArticle(o, replaceOnce(GOOD_C, '<p>Painting a room yourself is cheaper', '<p>Watch ' + yt + ' first. Painting a room yourself is cheaper'), OPTS_C), 'EMBED_URL_MISSING');
+  const emb = '<!-- wp:embed {"url":"' + yt + '","type":"video","providerNameSlug":"youtube"} -->\n<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube"><div class="wp-block-embed__wrapper">\n' + yt + '\n</div></figure>\n<!-- /wp:embed -->';
+  expectError(V.validateArticle(insertBeforeSnippet(ORIG, emb), insertBeforeSnippet(GOOD, emb.replace('\n' + yt + '\n', '\nhttps://www.youtube.com/watch?v=OTHER\n')), OPTS), 'EMBED_URL_MISSING');
+});
+
+test('SHORTCODE_ADDED / PLACEHOLDER: new shortcodes and bracket or XX placeholders', () => {
+  expectError(validate(insertBeforeSnippet(GOOD, para('[gallery]'))), 'SHORTCODE_ADDED');
+  expectError(validate(insertBeforeSnippet(GOOD, para('[contact-form-7 id="12"]'))), 'SHORTCODE_ADDED');
+  for (const t of ['Written by [Your Name], see [Source].', '[Image of a tyre gauge here]', 'A set costs about $XX per year.']) {
+    expectError(validate(insertBeforeSnippet(GOOD, para(t))), 'PLACEHOLDER');
+  }
+});
+
+test('LINK_ATTR_CHANGED: rel="nofollow sponsored" of an original (affiliate) link must stay', () => {
+  const o = para('Buy the <a href="https://www.amazon.com/dp/B000TEST?tag=me-20" rel="nofollow sponsored noopener" target="_blank">gauge</a> today, it works well for most cars on the road.');
+  expectError(V.validateArticle(o, o.replace(' rel="nofollow sponsored noopener"', ''), OPTS), 'LINK_ATTR_CHANGED');
+  expectError(V.validateArticle(o, o.replace('nofollow sponsored noopener', 'noopener'), OPTS), 'LINK_ATTR_CHANGED');
+  assert.equal(V.validateArticle(o, o.replace('nofollow sponsored noopener', 'sponsored nofollow noreferrer'), OPTS).pass, true);
+  // the same URL linked once with and once without rel in the original: nothing required
+  const o2 = o + '\n' + para('Or see <a href="https://www.amazon.com/dp/B000TEST?tag=me-20">the listing</a> for the current price today.');
+  assert.equal(V.validateArticle(o2, o2.replace(' rel="nofollow sponsored noopener"', ''), OPTS).pass, true);
+});
+
+test('IMG_COUNT / IMG_CHANGED: data-URI images over 10 KB are seen (removed or corrupted)', () => {
+  const b64 = 'iVBORw0KGgo'.repeat(1500);
+  const img = '<!-- wp:html -->\n<p><img src="data:image/png;base64,' + b64 + '" alt="chart" width="600" height="300"></p>\n<!-- /wp:html -->';
+  const o = replaceOnce(ORIG, '<!-- wp:more -->', img + '\n\n<!-- wp:more -->');
+  const e = replaceOnce(GOOD, '<!-- wp:more -->', img + '\n\n<!-- wp:more -->');
+  assert.equal(V.validateArticle(o, e, OPTS).pass, true);
+  assert.equal(V.validateArticle(o, e, OPTS).stats.imagesOriginal, 3);
+  expectError(V.validateArticle(o, GOOD, OPTS), 'IMG_COUNT');
+  expectError(V.validateArticle(o, e.replace(b64, b64.slice(0, 12000) + 'XXXX'), OPTS), 'IMG_CHANGED');
+  // an <img> tag broken by an unclosed quote (not parsed as a tag) still counts
+  expectError(V.validateArticle(o, e + '\n<img src="https://evil.test/x.jpg', OPTS), 'IMG_COUNT');
+});
+
+test('IMG_CHANGED: an image moved into another section (order kept) is caught', () => {
+  const s = GOOD.indexOf('<!-- wp:image {"id":101');
+  const e = GOOD.indexOf('<!-- /wp:image -->', s) + '<!-- /wp:image -->'.length;
+  const block = GOOD.slice(s, e);
+  const moved = replaceOnce(GOOD.slice(0, s) + GOOD.slice(e), '<!-- wp:list -->', block + '\n\n<!-- wp:list -->');
+  const r = validate(moved);
+  expectError(r, 'IMG_CHANGED');
+  assert.ok(r.errors.some((x) => /moved to another section/.test(x.message)));
+});
+
+test('CRLF originals: a Windows-saved original compares equal to the model\'s LF output', async () => {
+  const o = replaceOnce(ORIG_C, '<h2>What Affects the Cost</h2>', '<script>\n  (adsbygoogle = window.adsbygoogle || []).push({});\n</script>\n<h2>What Affects the Cost</h2>').replace(/\n/g, '\r\n');
+  const e = replaceOnce(GOOD_C, '<h2>What Affects the Cost of Painting a Room?</h2>', '<script>\n  (adsbygoogle = window.adsbygoogle || []).push({});\n</script>\n<h2>What Affects the Cost of Painting a Room?</h2>');
+  const r = V.validateArticle(o, e, OPTS_C);
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
+  const ob = replaceOnce(ORIG, 'class="wp-block-rank-math-toc-block" id="rank-math-toc"', 'class="wp-block-rank-math-toc-block"\nid="rank-math-toc"').replace(/\n/g, '\r\n');
+  const eb = replaceOnce(GOOD, 'class="wp-block-rank-math-toc-block" id="rank-math-toc"', 'class="wp-block-rank-math-toc-block"\nid="rank-math-toc"');
+  const p = await V.processEditorOutput(ob, wrapOutput(eb), Object.assign({}, OPTS, NOFETCH));
+  assert.equal(p.action, 'publish', JSON.stringify(p.errors));
+  assert.ok(!p.html.includes('\r'));
+});
+
+test('sanitizeLinks never edits links inside scripts or JSON-LD (no false SCRIPT_CHANGED)', () => {
+  const sc = '<!-- wp:html --><script>document.write(\'<a href="https://tubetyre.com/deal/">deal</a>\');</script><!-- /wp:html -->';
+  const ld = '<script type="application/ld+json">{"@context":"https://schema.org","@type":"HowTo","name":"x","step":[{"@type":"HowToStep","text":"See <a href=\\"/guide/\\">guide</a>"}]}</script>';
+  for (const add of [sc, ld]) {
+    const s = V.sanitizeLinks(ORIG + '\n' + add, GOOD + '\n' + add, OPTS, []);
+    assert.deepEqual(s.removed, []);
+    const r = V.validateArticle(ORIG + '\n' + add, s.html, OPTS);
+    assert.equal(r.pass, true, JSON.stringify(r.errors));
+  }
+});
+
+test('FIRST_ELEMENT: a Google-Docs <span> intro kept and reworded is fine; TITLE_IN_BODY sees bare and <strong> title lines', () => {
+  const g = '<span style="font-weight: 400;">Painting a room is cheap and easy for most people with a free weekend.</span>\n\n<h2>Cost</h2>\nBody text about the cost of painting a room in most places.';
+  assert.equal(V.validateArticle(g, g.replace('cheap and easy', 'cheap and simple'), OPTS_C).pass, true);
+  const title = 'How Much Does It Cost to Paint a Room?';
+  const opts = Object.assign({}, OPTS_C, { postTitle: title });
+  expectError(V.validateArticle(ORIG_C, title + '\n\n' + ORIG_C, opts), 'TITLE_IN_BODY');
+  expectError(V.validateArticle(ORIG_C, '<strong>' + title + '</strong>\n' + ORIG_C, opts), 'TITLE_IN_BODY');
+  assert.equal(V.validateArticle(ORIG_C, ORIG_C, opts).pass, true);
+});
+
+test('Rule 5: FAQ schema next to a plugin FAQ, a second Sources list or a second Last checked line', () => {
+  const Y = '<!-- wp:yoast/faq-block {"questions":[]} -->\n<div class="schema-faq wp-block-yoast-faq-block"></div>\n<!-- /wp:yoast/faq-block -->';
+  const ld = '<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[]}</script>';
+  expectError(V.validateArticle(ORIG + '\n' + Y, GOOD + '\n' + Y + '\n' + ld, OPTS), 'JSONLD_TYPE');
+  expectError(validate(GOOD + '\n<!-- wp:heading -->\n<h2 class="wp-block-heading">Sources</h2>\n<!-- /wp:heading -->\n<!-- wp:html -->\n<ol><li><a href="https://www.nhtsa.gov/equipment/tires">NHTSA</a>: again</li></ol>\n<!-- /wp:html -->'), 'SECTION_DUPLICATED');
+  const lc = (t) => para('<em>Last checked: 2026-09-26. ' + t + '</em>');
+  expectError(validate(insertBeforeSnippet(insertBeforeSnippet(GOOD, lc('Dates verified.')), lc('Figures verified.')), { webSearchCount: 5 }), 'SECTION_DUPLICATED');
+  // a question heading that mentions FAQ is not a second FAQ section
+  const q = '<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">What is a FAQ page?</h3>\n<!-- /wp:heading -->\n' + para('A page that answers common questions about one topic.');
+  assert.ok(!codes(validate(insertBeforeSnippet(insertBeforeSnippet(GOOD, NEW_FAQ), q)).errors).includes('SECTION_DUPLICATED'));
+});
+
+test('NEW_FAQ_NOT_ALLOWED: FAQ headings in other languages; an existing plain FAQ (any language) may be rebuilt', () => {
+  const de = '<!-- wp:heading -->\n<h2 class="wp-block-heading">Häufig gestellte Fragen</h2>\n<!-- /wp:heading -->\n<!-- wp:heading {"level":3} -->\n<h3 class="wp-block-heading">Wie oft?</h3>\n<!-- /wp:heading -->\n' + para('Einmal im Monat.');
+  expectError(validate(insertBeforeSnippet(GOOD, de), { allowNewFaq: false }), 'NEW_FAQ_NOT_ALLOWED');
+  const q = (n) => '<h3>Hur länge håller däck?</h3><p>' + uniqueWords(n, 'x') + '</p>';
+  const o = '<p>' + uniqueWords(60, 'a') + '</p><h2>Vanliga frågor</h2>' + q(20);
+  const e = '<p>' + uniqueWords(60, 'a') + '</p><h2>Vanliga frågor</h2><details><summary>Hur länge håller däck?</summary><p>' + uniqueWords(20, 'x') + '</p></details>';
+  const r = V.validateArticle(o, e, { siteDomains: ['a.se'], allowNewFaq: false });
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
+});
+
+test('LAST_CHECKED_WITHOUT_RESEARCH: translated Last checked line (today\'s date), "Updated ... verified" claims', () => {
+  const opts = { webSearchCount: 0, today: '2026-09-27' };
+  expectError(validate(insertBeforeSnippet(GOOD, para('<em>Zuletzt geprüft: 27.09.2026.</em>')), opts), 'LAST_CHECKED_WITHOUT_RESEARCH');
+  expectError(validate(insertBeforeSnippet(GOOD, para('<em>Last reviewed September 27, 2026.</em>')), opts), 'LAST_CHECKED_WITHOUT_RESEARCH');
+  expectError(V.validateArticle(ORIG_C, replaceOnce(GOOD_C, '<h2>How Much', '<p><em>Updated: September 2026. Prices verified.</em></p>\n<h2>How Much'), OPTS_C), 'LAST_CHECKED_WITHOUT_RESEARCH');
+  // with research, these are not blocked by this rule
+  assert.equal(validate(insertBeforeSnippet(GOOD, para('<em>Zuletzt geprüft: 27.09.2026.</em>')), { webSearchCount: 4, today: '2026-09-27' }).pass, true);
+});
+
+test('LAST_CHECKED_NOT_ALLOWED: "Last checked line: no" blocks a new or changed line even with research', () => {
+  const line = para('<em>Last checked: 2026-09-26. Dates and figures were verified against official sources.</em>');
+  const edited = replaceOnce(GOOD, QA_BOX_START, line + '\n\n' + QA_BOX_START);
+  expectError(validate(edited, { webSearchCount: 8, lastCheckedLine: 'no' }), 'LAST_CHECKED_NOT_ALLOWED');
+  assert.equal(validate(edited, { webSearchCount: 8, lastCheckedLine: 'auto' }).pass, true);
+  const o = replaceOnce(ORIG, '<!-- wp:rank-math/toc-block', line + '\n\n<!-- wp:rank-math/toc-block');
+  assert.equal(V.validateArticle(o, edited, Object.assign({}, OPTS, { webSearchCount: 8, lastCheckedLine: 'no' })).pass, true);
+});
+
+test('NEW_NUMBER_WITHOUT_RESEARCH / NUMBER_MISSING: without research no price, percentage or year is invented or dropped', () => {
+  expectError(V.validateArticle(ORIG_C, replaceOnce(GOOD_C, 'Buy good paint, because', 'Budget paint costs $2 to $5 per square foot. Buy good paint, because'), OPTS_C), 'NEW_NUMBER_WITHOUT_RESEARCH');
+  const changed = V.validateArticle(ORIG_C, replaceAll(GOOD_C, '$800', '$950'), OPTS_C);
+  expectError(changed, 'NEW_NUMBER_WITHOUT_RESEARCH');
+  expectError(changed, 'NUMBER_MISSING');
+  expectError(V.validateArticle(ORIG_C, replaceOnce(GOOD_C, 'Cost to Paint a Room?</h2>', 'Cost to Paint a Room in 2026?</h2>'), OPTS_C), 'NEW_NUMBER_WITHOUT_RESEARCH');
+  expectError(V.validateArticle(ORIG_C, replaceAll(GOOD_C, 'before 1978', 'long ago'), OPTS_C), 'NUMBER_MISSING');
+  expectError(V.validateArticle(ORIG_C, replaceOnce(GOOD_C, 'often covers better.', 'often covers about 20% better.'), OPTS_C), 'NEW_NUMBER_WITHOUT_RESEARCH');
+  // reformatting the original's own figures is fine
+  const reformatted = replaceOnce(GOOD_C, 'charges $300 to $800 for the walls', 'charges $300-800 for the walls');
+  assert.equal(V.validateArticle(ORIG_C, reformatted, OPTS_C).pass, true, JSON.stringify(V.validateArticle(ORIG_C, reformatted, OPTS_C).errors));
+  // with research (or unknown) figures may change
+  assert.ok(!codes(V.validateArticle(ORIG_C, replaceAll(GOOD_C, '$800', '$950'), { siteDomains: ['getcostidea.com'], webSearchCount: 6 }).errors).includes('NUMBER_MISSING'));
+});
+
+test('BLOCK_COMMENTS_IN_CLASSIC and BLOCK_MARKUP_MISMATCH', () => {
+  expectError(V.validateArticle(ORIG_C, '<!-- wp:paragraph -->\n' + GOOD_C.replace('</p>', '</p>\n<!-- /wp:paragraph -->'), OPTS_C), 'BLOCK_COMMENTS_IN_CLASSIC');
+  const h = '<!-- wp:heading -->\n<h2 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h2>';
+  expectError(validate(replaceOnce(GOOD, h, '<!-- wp:heading -->\n<h3 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h3>')), 'BLOCK_MARKUP_MISMATCH');
+  expectError(validate(replaceOnce(GOOD, h, '<!-- wp:heading {"level":3} -->\n<h2 class="wp-block-heading">How Often Should You Check Tyre Pressure?</h2>')), 'BLOCK_MARKUP_MISMATCH');
+  expectError(validate(replaceOnce(GOOD, '<!-- wp:list {"ordered":true} -->', '<!-- wp:list -->')), 'BLOCK_MARKUP_MISMATCH');
+  // a mismatch the original already had is not the editor's fault
+  const o = replaceOnce(ORIG, '<!-- wp:list {"ordered":true} -->', '<!-- wp:list -->');
+  const e = replaceOnce(GOOD, '<!-- wp:list {"ordered":true} -->', '<!-- wp:list -->');
+  assert.ok(!codes(V.validateArticle(o, e, OPTS).errors).includes('BLOCK_MARKUP_MISMATCH'));
+});
+
+test('HEADING_ORDER is relative: a skipped level the original already had (custom box heading) is not a failure', () => {
+  const box = '<div class="tip-box" style="border:1px solid #ccc;padding:12px;"><h4 class="tip-title">Tip</h4>Measure twice before you buy paint.</div>';
+  const o = replaceOnce(ORIG_C, '<h2>How to Save Money</h2>', '<h2>How to Save Money</h2>\n' + box);
+  const e = replaceOnce(GOOD_C, '<h2>How Can You Save Money on Painting a Room?</h2>', '<h2>How Can You Save Money on Painting a Room?</h2>\n' + box);
+  const r = V.validateArticle(o, e, OPTS_C);
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
+  // a new jump is still caught
+  expectError(V.validateArticle(o, e.replace('<h4 class="tip-title">Tip</h4>', '<h4 class="tip-title">Quick tip</h4>'), OPTS_C), 'HEADING_ORDER');
+});
+
+test('DUPLICATE_CONTENT: a repeated bare-text (wpautop) paragraph in a classic article', () => {
+  const p = 'Painting a room yourself is cheaper, but it takes time and some skill to get clean lines and an even finish. ' +
+    'A professional painter works faster, brings the right tools and usually gives a better result, especially on ceilings and trim.';
+  expectError(V.validateArticle(ORIG_C, replaceOnce(ORIG_C, p, p + '\n\n' + p), OPTS_C), 'DUPLICATE_CONTENT');
+  assert.ok(!codes(V.validateArticle(ORIG_C, ORIG_C, OPTS_C).errors).includes('DUPLICATE_CONTENT'));
+});
+
+test('false fails fixed: Spanish "TODO", thin original expanded, uppercase TODO: still caught', () => {
+  assert.equal(V.validateArticle('<p>Guía para pintar una habitación con poco dinero y buen resultado.</p>', '<p>TODO lo que necesitas saber para pintar una habitación con poco dinero y buen resultado.</p>', { siteDomains: ['a.es'] }).pass, true);
+  const o = '<p>' + uniqueWords(60, 'w') + '</p>';
+  const e = o + '<h2>More</h2><p>' + uniqueWords(300, 'z') + '</p>';
+  assert.equal(V.validateArticle(o, e, { siteDomains: ['a.com'] }).pass, true);
+  expectError(V.validateArticle(o, e + '<p>' + uniqueWords(400, 'q') + '</p>', { siteDomains: ['a.com'] }), 'WORD_RATIO_EXTREME');
+});
+
+test('mutation-test gaps: src-only / srcset-only image changes, uppercase tags, host forms, box style spacing, mixed JSON-LD type', () => {
+  expectError(validate(replaceOnce(GOOD, 'src="https://tubetyre.com/wp-content/uploads/2024/05/door-sticker-800x600.jpg"', 'src="https://tubetyre.com/wp-content/uploads/2024/05/door-sticker-800x601.jpg"')), 'IMG_CHANGED');
+  expectError(validate(replaceOnce(GOOD, 'tyre-pressure-gauge-300x200.jpg 300w', 'tyre-pressure-gauge-300x201.jpg 300w')), 'IMG_CHANGED');
+  expectError(validate(insertBeforeSnippet(GOOD, '<H1>Title again</H1>')), 'FORBIDDEN_TAG');
+  expectError(validate(insertBeforeSnippet(GOOD, '<!-- wp:html --><IMG SRC="https://tubetyre.com/x.jpg"><!-- /wp:html -->')), 'IMG_COUNT');
+  expectError(validate(insertBeforeSnippet(GOOD, para('See <a href="//www.tubetyre.com/x">x</a>.'))), 'NEW_INTERNAL_LINK');
+  expectError(validate(insertBeforeSnippet(GOOD, para('See <a href=https://TubeTyre.com/x>x</a>.'))), 'NEW_INTERNAL_LINK');
+  expectError(V.validateArticle(ORIG, insertBeforeSnippet(GOOD, para('See <a href="https://tubetyre.com/x">x</a>.')), { siteDomains: ['www.tubetyre.com'] }), 'NEW_INTERNAL_LINK');
+  expectError(validate(insertBeforeSnippet(GOOD, '<!-- wp:html --><div style="background: #EEF3FE ;padding:1px"><p>Quick Answer again</p></div><!-- /wp:html -->')), 'BOX_DUPLICATED');
+  expectError(validate(GOOD + '<script type="application/ld+json">{"@type":["FAQPage","HowTo"]}</script>'), 'JSONLD_TYPE');
+});
+
+test('no false fails from the new text rules: normal sentences that look a bit like notes or chat', () => {
+  const ok = (html, extra) => {
+    const r = validate(insertBeforeSnippet(GOOD, html), extra);
+    assert.equal(r.pass, true, html + ' => ' + JSON.stringify(r.errors));
+  };
+  ok(para('In the rest of this article, you will learn how to read the numbers on the sidewall and when to ask a tyre shop for help.'));
+  ok(para('ChatGPT works as an AI assistant here, but it cannot see your tyres or read the gauge for you.'));
+  ok(para('If a month has passed since you last checked the pressure, check it again before a long trip.'), { webSearchCount: 0 });
+  ok(para('The content of the door sticker stays unchanged when you fit new tyres of the same size and load rating.'));
+  // a fact the original states, reworded without research, keeps its year
+  const o = insertBeforeSnippet(ORIG, para('In 2023 the rules for spare wheels changed for new cars sold in some countries.'));
+  const e = insertBeforeSnippet(GOOD, para('The rules for spare wheels were updated in 2023 for new cars sold in some countries.'));
+  const r = V.validateArticle(o, e, Object.assign({}, OPTS, { webSearchCount: 0 }));
+  assert.equal(r.pass, true, JSON.stringify(r.errors));
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -902,10 +1428,10 @@ function bigArticle(base, targetBytes) {
   return out;
 }
 
-test('performance: 300 KB article validated in well under a second', async () => {
-  const o = bigArticle(ORIG, 300 * 1024);
-  const e = bigArticle(GOOD, 300 * 1024);
-  assert.ok(o.length >= 300 * 1024 && e.length >= 300 * 1024);
+test('performance: 1 MB article validated within 2 seconds', async () => {
+  const o = bigArticle(ORIG, 1024 * 1024);
+  const e = bigArticle(GOOD, 1024 * 1024);
+  assert.ok(o.length >= 1024 * 1024 && e.length >= 1024 * 1024);
   const t0 = process.hrtime.bigint();
   const r = V.validateArticle(o, e, OPTS);
   const ms = Number(process.hrtime.bigint() - t0) / 1e6;
@@ -913,8 +1439,12 @@ test('performance: 300 KB article validated in well under a second', async () =>
   const p = await V.processEditorOutput(o, wrapOutput(e), Object.assign({}, OPTS, { checkLinks: false }));
   const ms2 = Number(process.hrtime.bigint() - t1) / 1e6;
   console.log('# validateArticle on ' + Math.round(e.length / 1024) + ' KB: ' + ms.toFixed(1) + ' ms; processEditorOutput: ' + ms2.toFixed(1) + ' ms');
-  assert.ok(ms < 1000, 'took ' + ms + ' ms');
-  assert.ok(ms2 < 1500, 'took ' + ms2 + ' ms');
+  assert.ok(ms < 2000, 'took ' + ms + ' ms');
+  assert.ok(ms2 < 2000, 'took ' + ms2 + ' ms');
+  const t2 = process.hrtime.bigint();
+  V.filterAuditIssues(e, { verdict: 'fix', issues: [{ severity: 'high', quote: 'the tyre pressure should always be checked when the tyres are warm after a drive' }] });
+  const ms3 = Number(process.hrtime.bigint() - t2) / 1e6;
+  assert.ok(ms3 < 2000, 'audit filter took ' + ms3 + ' ms');
   assert.ok(Array.isArray(r.errors) && p.action);
 });
 
@@ -944,15 +1474,29 @@ test('robustness: pathological 300 KB inputs finish fast (no catastrophic backtr
     pluginPairs: rep('<!-- wp:x/y --><p>a</p><!-- /wp:x/y -->'),
     listItems: rep('<li>'),
     images: rep('<img src="a.jpg" alt="x">'),
-    attrsNoClose: '<img ' + rep('a=b ')
+    attrsNoClose: '<img ' + rep('a=b '),
+    unclosedQuoteThenTags: '<img src="' + rep('<p>ab</p>'),
+    quoteSoup: rep('<a b="c\' d=\'e" '),
+    dataUri: '<img src="data:' + 'A'.repeat(N) + '">',
+    closeWithoutOpen: rep('<div></p>'),
+    stars: rep('**a '),
+    citations: rep('[1] \u3010x\u3011 '),
+    money: rep('$1,000 to $2,000 and 10-20% in 2024 '),
+    hashLines: rep('\n## x '),
+    bareChat: rep('Here is the article\n\n'),
+    headingIds: rep('<h2 id="a">x</h2><img src="b">'),
+    wpHeadings: rep('<!-- wp:heading {"level":3} --><h2>x</h2><!-- /wp:heading -->'),
+    urlLines: rep('\nhttps://www.youtube.com/watch?v=x\n'),
+    relLinks: rep('<a href="https://a.test/" rel="nofollow">a</a>')
   };
   for (const [name, s] of Object.entries(cases)) {
     const t0 = process.hrtime.bigint();
     V.validateArticle(s, s + '<p>x</p>', OPTS);
     V.sanitizeLinks(s, s + '<a href="https://reddit.com/">r</a>', OPTS, ['https://x.test/']);
-    V.filterAuditIssues(s, { verdict: 'pass', issues: [{ severity: 'low', quote: 'some quote that is not there' }] });
+    V.filterAuditIssues(s, { verdict: 'pass', issues: [{ severity: 'low', quote: 'some quote that is not there at all in this text' }] });
     V.parseEditorOutput(s);
-    await V.processEditorOutput(s, '<<<ARTICLE_HTML>>>\n' + s + '\n<<<META_JSON>>>\n{"status":"edited"}\n<<<END>>>', { checkLinks: false });
+    await V.processEditorOutput(s, '<<<ARTICLE_HTML>>>\n' + s + '\n<<<META_JSON>>>\n{"status":"edited"}\n<<<END>>>',
+      { checkLinks: false, siteDomains: ['tubetyre.com'], webSearchCount: 0, today: '2026-09-27' });
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
     assert.ok(ms < 2000, name + ' took ' + ms.toFixed(0) + ' ms');
   }
