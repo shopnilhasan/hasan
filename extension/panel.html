@@ -294,6 +294,9 @@ code { background: var(--field); padding: 1px 5px; border-radius: 4px; font-size
 .pi-badge.faq { background: rgba(239,83,80,.18); color: #ff8a8a; border: 1px solid rgba(239,83,80,.5); }
 .pi-badge.concl { background: rgba(255,167,38,.15); color: #ffc46b; border: 1px solid rgba(255,167,38,.45); }
 .pi-badge.count { background: rgba(239,83,80,.28); color: #ffb3b3; }
+/* Safety Gate / Fact check badges on Failed rows (v3.46.0) */
+.pi-badge.gate { background: rgba(156,120,255,.18); color: #c9b6ff; border: 1px solid rgba(156,120,255,.5); }
+.pi-badge.fact { background: rgba(255,167,38,.15); color: #ffc46b; border: 1px solid rgba(255,167,38,.45); }
 .audit-mark { width: 16px; height: 16px; accent-color: #ef5350; flex: none; cursor: pointer; margin: 0; }
 .count-chip { background: var(--border); color: var(--text); font-size: 11px; font-weight: 700; padding: 1px 8px; border-radius: 99px; margin-left: 6px; }
 
@@ -397,6 +400,7 @@ details.group.box-failed  > summary { border-left: 3px solid var(--danger); }
       <a data-sc="sec-config">Configuration</a>
       <a data-sc="sec-posts">Posts to Update</a>
       <a data-sc="sec-fast">Fast Submit</a>
+      <a data-sc="sec-gate">Safety Gate</a>
       <a data-sc="sec-audit">Audit Issues</a>
       <a data-sc="sec-faq">FAQ/Conclusion</a>
       <a data-sc="sec-failed">Failed Posts</a>
@@ -766,6 +770,82 @@ https://yoursite.com/some-other-post/"></textarea>
       </div>
     </details>
 
+    <!-- 🛡 Safety Gate (v3.46.0): every AI edit is checked BEFORE it is saved -->
+    <details class="group" id="sec-gate">
+      <summary>🛡 Safety Gate
+        <span class="hint">check every AI edit before saving</span><span class="chev">▶</span>
+      </summary>
+      <div class="group-body">
+        <div class="card-desc" style="margin-top:12px;">Nobody has to read the posts before they go live, so the extension checks every AI edit <b>before</b> it is saved. If a check fails, the post is <b>NOT changed</b> (the original stays live) and the row goes to <b>Failed posts</b> with the reason.</div>
+        <div class="grid" style="margin-top:12px;">
+          <div>
+            <label>Safety Gate — check every AI edit before saving (recommended)</label>
+            <select id="gateEnabled">
+              <option value="on" selected>On — check every edit before saving (recommended)</option>
+              <option value="off">Off — save without these checks (old behaviour)</option>
+            </select>
+            <small style="display:block;margin-top:6px;">Checks that no images, tables, links, shortcodes or blocks were lost, that no big part of the text was removed, and that the article is complete (not cut off).</small>
+          </div>
+          <div>
+            <label>Test new links</label>
+            <select id="gateLinkCheck">
+              <option value="on" selected>On — test new links and remove dead ones (recommended)</option>
+              <option value="off">Off — do not test links</option>
+            </select>
+            <small style="display:block;margin-top:6px;">Only links that the AI added are tested. A dead link is removed, but its text stays.</small>
+          </div>
+          <div>
+            <label>New FAQ section</label>
+            <select id="gateNewFaq">
+              <option value="auto" selected>Auto — the AI may add a FAQ when the post has none</option>
+              <option value="no">No — block edits that add a new FAQ</option>
+            </select>
+            <small style="display:block;margin-top:6px;">This only decides about a NEW FAQ. It does not remove an FAQ that is already in the post.</small>
+          </div>
+          <div>
+            <label>Your other domains (optional)</label>
+            <input type="text" id="gateSiteDomains" placeholder="e.g. shop.example.com, example.net">
+            <small style="display:block;margin-top:6px;">Links to these sites count as your own (internal) links. The domain of the WordPress site you run is always included. Separate with commas or spaces.</small>
+          </div>
+        </div>
+        <div id="gateOffNote" class="card-desc" style="display:none;margin-top:10px;border-left:3px solid #f0a020;padding-left:10px;"><b>The Safety Gate is Off.</b> AI edits are saved without these checks, and the fact check below is skipped too.</div>
+        <hr>
+        <div id="factCheckBlock">
+          <div class="card-desc"><b>Fact check (2nd AI round)</b> — after the Safety Gate passes, a <b>new</b> AI chat compares the original and the edited article and looks for wrong facts, made-up details and lost information. If it finds a serious problem, the AI gets <b>one</b> chance to fix it in a new chat. If it still fails, the post is <b>NOT changed</b>.</div>
+          <div class="grid">
+            <div>
+              <label>Fact check — check facts before saving (recommended)</label>
+              <select id="factCheck">
+                <option value="on" selected>On — check facts in a new chat before saving (recommended)</option>
+                <option value="off">Off — skip the fact check</option>
+              </select>
+              <small style="display:block;margin-top:6px;">This takes one more AI reply per post, so each post takes longer.</small>
+            </div>
+            <div>
+              <label>AI for the fact check</label>
+              <select id="factCheckAiId">
+                <option value="">Same AI as the run</option>
+              </select>
+              <small style="display:block;margin-top:6px;">A different AI can catch mistakes the first one missed.</small>
+            </div>
+            <div>
+              <label>Fact-check prompt</label>
+              <select id="factCheckPromptId"></select>
+              <small style="display:block;margin-top:6px;">Only prompts of the type “Fact check (2nd AI round)” are listed. You can add or edit them in Settings → Prompts.</small>
+            </div>
+            <div>
+              <label>If the fact check itself breaks</label>
+              <select id="factCheckOnError">
+                <option value="keep" selected>Keep the original — do not save (safest)</option>
+                <option value="save">Save the edit anyway (the Safety Gate already passed)</option>
+              </select>
+              <small style="display:block;margin-top:6px;">For example: the AI times out, or its reply has no check result.</small>
+            </div>
+          </div>
+        </div>
+      </div>
+    </details>
+
     <details class="group">
       <summary><span class="step-chip">6</span> Retry &amp; recovery
         <span class="hint">failed posts, audit issues, fallback AI</span><span class="chev">▶</span>
@@ -1097,8 +1177,15 @@ https://yoursite.com/some-other-post/"></textarea>
           <select id="promptType">
             <option value="audit" selected>Audit + Fix — show audit report after saving</option>
             <option value="edit">Edit only — just edit and save, no audit report</option>
+            <option value="factcheck">Fact check (2nd AI round) — checks an edit before it is saved</option>
           </select>
         </div>
+      </div>
+      <div class="row" style="margin-top:10px;align-items:center;">
+        <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;margin:0;">
+          <input type="checkbox" id="promptWebSearch" style="width:auto;margin:0;"> 🌐 Allow AI web search with this prompt
+        </label>
+        <small style="flex:1;min-width:200px;color:var(--text-faint);">On: the AI may use normal web search while it edits (deep research and agent modes are still switched off). Off: web search is switched off. A fact-check prompt uses the setting of the prompt you run.</small>
       </div>
       <label style="margin-top:10px;">Prompt text</label>
       <textarea id="promptText" style="min-height:130px;" placeholder="Your full prompt here..."></textarea>

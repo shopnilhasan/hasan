@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Auto Post Updater Pro",
-  "version": "3.45.0",
-  "description": "Automated post updater with WordPress auto-connect, API mode, a reliable background batch engine, live settings, per-post retry, one-click test run, bulk parallel runs (up to 5 posts at once), chunked fast-submit cycles that submit a group, recover & update it, then automatically start the next group, a custom recovery-delay field, a unified Failed + Audit Retry Center, a dedicated FAQ/Conclusion-missing sub-box, clearly separated Successful/Audit/Failed result boxes, dual-save safety, one-click section navigation, a faster paste box, Clear-All plus a full Clear-Backups reset, auto-pause on repeated failures, truncation-proof completeness checks, ETA, finish notifications, and orphan-tab cleanup.",
+  "version": "3.46.0",
+  "description": "Automated post updater with WordPress auto-connect, API mode, a reliable background batch engine, live settings, per-post retry, one-click test run, bulk parallel runs (up to 5 posts at once), chunked fast-submit cycles that submit a group, recover & update it, then automatically start the next group, a custom recovery-delay field, a unified Failed + Audit Retry Center, a dedicated FAQ/Conclusion-missing sub-box, clearly separated Successful/Audit/Failed result boxes, dual-save safety, one-click section navigation, a faster paste box, Clear-All plus a full Clear-Backups reset, auto-pause on repeated failures, truncation-proof completeness checks, ETA, finish notifications, orphan-tab cleanup, and a Safety Gate that code-checks every AI edit and runs an AI fact-check round in a new chat before anything is saved (the original stays live when a check fails).",
   "permissions": [
     "activeTab",
     "storage",

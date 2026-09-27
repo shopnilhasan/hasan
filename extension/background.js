@@ -1,5 +1,13 @@
 // ═══════════════════════════════════════════════════════════════════════
-// background.js - Auto Post Updater Pro v3.9
+// background.js - Auto Post Updater Pro v3.46.0
+//
+// v3.46.0 "Safety Gate":
+//   • Every AI edit passes a code Safety Gate (safety-gate.js) and, when on,
+//     an AI Fact-Check round in a NEW chat BEFORE anything is written to
+//     WordPress. Any failure leaves the original post live (Failed box).
+//   • Per-prompt web search, prompt tokens ([[TODAY]], [[SITE_DOMAIN]], ...),
+//     and extraction fixes (line-anchored "FIXED ARTICLE" divider, leading /
+//     trailing shortcodes kept).
 //
 // Major changes vs v2.1:
 //   • Provider-aware code block detection (ChatGPT/Claude/Gemini/Grok specific selectors)
@@ -12,6 +20,18 @@
 //   • settleTime is actually used now
 //   • Returns to panel tab automatically between slugs
 // ═══════════════════════════════════════════════════════════════════════
+
+// ──────────────────────────────────────────────────────────────────────
+// Safety Gate validator (v3.46.0). A classic worker script that exposes
+// self.SafetyGate. If it cannot load, nothing unchecked is ever saved: with
+// the gate ON every post then fails with SAFETY_GATE "safety-gate.js not
+// loaded" (see runSafetyGateStep).
+// ──────────────────────────────────────────────────────────────────────
+try {
+  importScripts('safety-gate.js');
+} catch (e) {
+  console.error('[Batch] safety-gate.js could not be loaded: ' + (e && e.message ? e.message : e));
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // In-memory batch state (persisted to storage for SW restarts)
@@ -619,7 +639,7 @@ function estimateEtaSeconds() {
 function applyLiveJobSettings(cfg) {
   const job = runtime.job;
   if (!job || !cfg) return;
-  const allowed = ['site','aiUrl','aiName','aiKind','aiMode','aiProvider','aiApiBaseUrl','aiApiModel','aiApiKey','prompt','delayBetween','aiTimeout','updateWait','settleTime','onMissing','maxRetries','backgroundMode','completeness','apiMaxTokens','fallbackAi','autoSplit','pasteWait','continueRounds','retryMode','promptType','auditRetry','auditRetryCount','auditRetryTiming','htmlRecoveryAudit','htmlRecoveryFailed','htmlRecoveryAnyCode','limitGuard','failStopCount','failRetryAfter','fastPasteWait','fastPasteRetries','modelLimitGuard','geminiFlashGuard','modelLimitRetryHours','limitResumeMode'];
+  const allowed = ['site','aiUrl','aiName','aiKind','aiMode','aiProvider','aiApiBaseUrl','aiApiModel','aiApiKey','prompt','delayBetween','aiTimeout','updateWait','settleTime','onMissing','maxRetries','backgroundMode','completeness','apiMaxTokens','fallbackAi','autoSplit','pasteWait','continueRounds','retryMode','promptType','auditRetry','auditRetryCount','auditRetryTiming','htmlRecoveryAudit','htmlRecoveryFailed','htmlRecoveryAnyCode','limitGuard','failStopCount','failRetryAfter','fastPasteWait','fastPasteRetries','modelLimitGuard','geminiFlashGuard','modelLimitRetryHours','limitResumeMode','gateEnabled','gateLinkCheck','gateNewFaq','gateSiteDomains','factCheck','factCheckAi','factCheckPrompt','factCheckOnError','promptWebSearch'];
   const changed = [];
   allowed.forEach((k) => {
     if (cfg[k] === undefined) return;
@@ -655,7 +675,36 @@ function applyLiveJobSettings(cfg) {
   // 'exact' = resume at the reset time the AI states; 'timer' = always use the
   // hours setting above.
   job.limitResumeMode = (job.limitResumeMode === 'timer') ? 'timer' : 'exact';
+  // Safety Gate + Fact-Check (v3.46.0).
+  normalizeSafetyGateSettings(job);
   if (changed.length) log('info', 'Applied updated settings to the running batch (' + changed.join(', ') + '). Effective from the next post.');
+}
+
+// Safety Gate + Fact-Check job fields (v3.46.0). Shared by startBatch and
+// applyLiveJobSettings. Both switches are ON unless explicitly turned off.
+function normalizeSafetyGateSettings(job) {
+  if (!job) return;
+  job.gateEnabled = !(job.gateEnabled === false || job.gateEnabled === 'off');
+  job.gateLinkCheck = !(job.gateLinkCheck === false || job.gateLinkCheck === 'off');
+  job.gateNewFaq = (job.gateNewFaq === 'no') ? 'no' : 'auto';
+  // Extra internal domains from the panel. The site's own host is always
+  // added at use time (gateSiteDomainsOf), so it never has to be typed.
+  const rawDomains = Array.isArray(job.gateSiteDomains)
+    ? job.gateSiteDomains
+    : String(job.gateSiteDomains || '').split(/[\s,;]+/);
+  const domains = [];
+  rawDomains.forEach((d) => {
+    const h = normalizeGateHost(d);
+    if (h && domains.indexOf(h) === -1) domains.push(h);
+  });
+  job.gateSiteDomains = domains;
+  job.factCheck = !(job.factCheck === false || job.factCheck === 'off');
+  // '' = the job's own AI; otherwise a resolved AI config (like fallbackAi).
+  const fa = job.factCheckAi;
+  job.factCheckAi = (fa && typeof fa === 'object' && (fa.aiUrl || (fa.aiMode && fa.aiMode !== 'web'))) ? fa : '';
+  job.factCheckPrompt = (typeof job.factCheckPrompt === 'string') ? job.factCheckPrompt : '';
+  job.factCheckOnError = (job.factCheckOnError === 'save') ? 'save' : 'keep';
+  job.promptWebSearch = (job.promptWebSearch === true || job.promptWebSearch === 'on');
 }
 
 function swapJobAi(fb) {
@@ -714,6 +763,8 @@ async function startBatch(job, options) {
   // 'exact' = resume at the reset time the AI states; 'timer' = always use the
   // hours setting above.
   job.limitResumeMode = (job.limitResumeMode === 'timer') ? 'timer' : 'exact';
+  // Safety Gate + Fact-Check (v3.46.0).
+  normalizeSafetyGateSettings(job);
   const requestedRecoverHome = normalizeHttpUrl(
     (typeof job.recoverProviderUrl === 'string') ? job.recoverProviderUrl.trim() : ''
   );
@@ -833,7 +884,9 @@ async function startBatch(job, options) {
   wpFetchMode = { origin: '', mode: 'direct' };
   setStatus('Starting batch — ' + job.slugs.length + ' posts on ' + job.site.name);
   log('step', 'Batch started: ' + job.slugs.length + ' slugs on ' + job.site.name + ' via ' + job.aiName);
-  log('info', 'Settings: AI timeout ' + job.aiTimeout + 's, retries ' + job.maxRetries + ', settle ' + job.settleTime + 's, update wait ' + job.updateWait + 's, HTML safety loose size only');
+  log('info', 'Settings: AI timeout ' + job.aiTimeout + 's, retries ' + job.maxRetries + ', settle ' + job.settleTime + 's, update wait ' + job.updateWait + 's, HTML safety loose size only' +
+    ', Safety Gate ' + (safetyGateOn() ? 'ON' : 'OFF') + ', fact check ' + (factCheckOn() ? 'ON' : 'OFF') +
+    (job.promptWebSearch ? ', web search allowed' : ''));
   if (job.parallel > 1) log('step', '⚡ PARALLEL MODE: up to ' + job.parallel + ' posts at the same time (worker window forced on; fallback AI disabled while parallel).');
   await persistRuntime();
   if (options?.deferProcess !== true) launchCurrentBatchLoop();
@@ -987,10 +1040,13 @@ async function processLoop() {
     // Automatic HTML Code Recovery (opt-in): a failed post is first retried by
     // reopening its saved AI session and reading the existing code box, BEFORE
     // any fresh regeneration ("retry new").
+    // Safety Gate / Fact-Check blocks are skipped: re-reading the same chat
+    // reply can never pass the same checks.
     let recovered = false;
     if (!success && !runtime.stopRequested && htmlRecoveryFailedOn() &&
         attemptLinks.aiSessionUrl && !isApiAIJob() &&
-        lastErr?.code !== 'POST_NOT_FOUND' && lastErr?.code !== 'USER_STOPPED') {
+        lastErr?.code !== 'POST_NOT_FOUND' && lastErr?.code !== 'USER_STOPPED' &&
+        !isSafetyBlockCode(lastErr?.code)) {
       recovered = await tryHtmlRecovery(rawSlug, slug, num, total, attemptLinks.aiSessionUrl, attemptLinks.aiProviderUrl);
     }
 
@@ -1229,6 +1285,9 @@ function rememberAttempt(rawInput, slug, result, message, links) {
     aiSessionUrl: durableSessionUrl,
     aiName: links?.aiName || runtime.job?.aiName || '',
     auditRetry: links?.auditRetry === true,
+    // Safety Gate / Fact-Check details of this attempt (v3.46.0).
+    gate: links?.gate || null,
+    factCheck: links?.factCheck || null,
     time: new Date().toLocaleTimeString(),
     isoTime: new Date().toISOString()
   });
@@ -1318,7 +1377,8 @@ async function runParallelBatch() {
       let recovered = false;
       if (!success && !runtime.stopRequested && !missingStop && htmlRecoveryFailedOn() &&
           attemptLinks.aiSessionUrl && !isApiAIJob() &&
-          lastErr?.code !== 'POST_NOT_FOUND' && lastErr?.code !== 'USER_STOPPED') {
+          lastErr?.code !== 'POST_NOT_FOUND' && lastErr?.code !== 'USER_STOPPED' &&
+          !isSafetyBlockCode(lastErr?.code)) {
         recovered = await tryHtmlRecovery(rawSlug, slug, num, total, attemptLinks.aiSessionUrl, attemptLinks.aiProviderUrl);
       }
 
@@ -1485,7 +1545,7 @@ async function fastSubmitSlug(rawSlug, slug, num, total, usedSessionUrls, gemini
   await saveOriginalBackup(slug, wpItem.title, wpItem.link, originalHtml, '');
 
   // 2) Open the AI, paste, SEND — and do not wait for the reply.
-  const payload = buildAIPayload(runtime.job.prompt, originalHtml);
+  const payload = buildAIPayload(runtime.job.prompt, originalHtml, { postTitle: plainPostTitle(wpItem.title) });
   setStatus(tag + ' 🚀 Submitting to ' + runtime.job.aiName + ' (no waiting)');
   log('step', tag + ' Opening ' + runtime.job.aiName + ' — paste, send, close.');
   await ensureWorkerWindowUsable();
@@ -1505,7 +1565,7 @@ async function fastSubmitSlug(rawSlug, slug, num, total, usedSessionUrls, gemini
       if (limitErr) throw limitErr;
       throw new Error(runtime.job.aiName + ' is not ready: ' + ready.error);
     }
-    await prepareProviderForEditing(aiTab.id, providerKind);
+    await prepareProviderForEditing(aiTab.id, providerKind, !!runtime.job.promptWebSearch);
     // MODEL LIMIT — checked BEFORE the paste, while the composer is still
     // empty, so the pasted article can never be mistaken for a limit notice.
     // A confirmed limit stops the whole run: nothing may be edited by a
@@ -2365,6 +2425,16 @@ function htmlRecoveryFailedOn() {
 // Auto-pause the whole batch the moment an AI usage/weekly limit is detected.
 function limitGuardOn() {
   return !!(runtime.job && runtime.job.limitGuard === true);
+}
+// Safety Gate (v3.46.0): code checks before every save. ON unless the job
+// explicitly switched it off.
+function safetyGateOn() {
+  return !!(runtime.job && runtime.job.gateEnabled !== false);
+}
+// AI Fact-Check round (v3.46.0). Part of the Safety Gate, so it never runs
+// while the gate itself is off.
+function factCheckOn() {
+  return !!(safetyGateOn() && runtime.job.factCheck !== false);
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -4100,13 +4170,15 @@ function trimToHtmlStart(text) {
 // ──────────────────────────────────────────────────────────────────────
 // Process a single slug (one attempt)
 // ──────────────────────────────────────────────────────────────────────
-async function prepareProviderForEditing(tabId, providerKind) {
+async function prepareProviderForEditing(tabId, providerKind, allowWebSearch) {
   // Turn OFF web search / research / browse before pasting for EVERY provider.
   // When ChatGPT (and others) browse, they "fact-check" affiliate roundups and
   // gut them -- removing tables, product scores, images, and products -- which
   // then fails the completeness check. Editing must stay offline.
+  // v3.46.0: a prompt marked "Allow AI web search" keeps plain search / web /
+  // browse toggles as they are; deep research / agent modes still go OFF.
   try {
-    return (await runInTab(tabId, prepareAIProviderPage, [providerKind]))?.result || { changed: 0 };
+    return (await runInTab(tabId, prepareAIProviderPage, [providerKind, allowWebSearch === true]))?.result || { changed: 0 };
   } catch (e) {
     return { changed: 0, error: e.message || String(e) };
   }
@@ -4532,6 +4604,9 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
   const tag = '[' + num + '/' + total + (tryNum > 0 ? ' try' + (tryNum + 1) : '') + ']';
   attemptLinks.aiName = runtime.job.aiName;
   attemptLinks.aiProviderUrl = attemptLinks.recoverProviderUrl || runtime.job.aiUrl;
+  // Safety Gate / Fact-Check results belong to THIS attempt only (v3.46.0).
+  attemptLinks.gate = null;
+  attemptLinks.factCheck = null;
 
   // ── 1) Find post via WP REST API ─────────────────────────────────────
   setStatus(tag + ' Looking up "' + slug + '" on ' + site.name);
@@ -4569,6 +4644,8 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
   }
   log('info', tag + ' Found post ID ' + postId);
   attemptLinks.postUrl = postUrl || siteUrl + '/' + slug.replace(/^\/+|\/+$/g, '') + '/';
+  // For the [[POST_TITLE]] prompt token (v3.46.0).
+  attemptLinks.postTitle = plainPostTitle(wpItem?.title);
 
   // ── Original HTML Fresh Recovery ──
   // Resolve the pre-update backup up front and let the normal REST/editor
@@ -4604,7 +4681,7 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
       await saveOriginalBackup(slug, wpItem?.title, attemptLinks.postUrl, originalHtml, attemptLinks.aiSessionUrl);
     }
 
-    const aiHtml = await generateHtmlForArticle(tag, num, total, originalHtml, attemptLinks, attemptTabs, 2);
+    let aiHtml = await generateHtmlForArticle(tag, num, total, originalHtml, attemptLinks, attemptTabs, 2);
 
     await sleep((runtime.job.settleTime || 3) * 1000);
     if (attemptTabs.ai) {
@@ -4614,6 +4691,11 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
       attemptTabs.ai = null;
       await sleep(700);
     }
+
+    // ── Safety Gate + Fact-Check (v3.46.0) — nothing has been written yet.
+    // Throws SAFETY_GATE / FACT_CHECK / FACT_CHECK_ERROR; returns the exact
+    // HTML to save (marker-free, dead links unwrapped, maybe fix-round HTML).
+    aiHtml = await applySafetyPipeline({ slug, tag, num, total, originalHtml, aiHtml, attemptLinks, attemptTabs, wpItem, stepNo: 2 });
 
     setStatus(tag + ' Updating WordPress directly through REST API');
     log('step', tag + ' Step 6: REST API update for ' + wpItem.restType + '/' + postId);
@@ -4664,7 +4746,7 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
   // auto-split, ready checks, verification and completeness gating behave the
   // same everywhere (previously web mode here had its own duplicate copy of
   // this flow and silently ignored the auto-split setting).
-  const aiHtml = await generateHtmlForArticle(tag, num, total, originalHtml, attemptLinks, attemptTabs, 4);
+  let aiHtml = await generateHtmlForArticle(tag, num, total, originalHtml, attemptLinks, attemptTabs, 4);
 
   // ── 8) Settle, then close AI tab ─────────────────────────────────────
   await sleep((runtime.job.settleTime || 3) * 1000);
@@ -4675,6 +4757,11 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
     attemptTabs.ai = null;
     await sleep(700);
   }
+
+  // ── 8b) Safety Gate + Fact-Check (v3.46.0) ───────────────────────────
+  // Before focusing/pasting, so the editor is never touched by an edit that
+  // fails. The paste and the 95% / verifyHtml re-read below use THIS HTML.
+  aiHtml = await applySafetyPipeline({ slug, tag, num, total, originalHtml, aiHtml, attemptLinks, attemptTabs, wpItem, stepNo: 4 });
 
   // ── 9) Focus WP editor tab ───────────────────────────────────────────
   setStatus(tag + ' Switching back to WP editor');
@@ -4742,6 +4829,836 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// SAFETY GATE + AI FACT-CHECK (v3.46.0)
+//
+// Nothing bad is ever saved: every AI edit must pass (1) the code Safety Gate
+// (safety-gate.js, compared with the TRUE original of this run) and, when on,
+// (2) an AI Fact-Check round in a NEW chat — before processSlug writes
+// anything to WordPress. applySafetyPipeline is called in BOTH processSlug
+// branches right after generation. A failure throws SAFETY_GATE, FACT_CHECK
+// or FACT_CHECK_ERROR: the original post stays live and the row lands in the
+// Failed box through the normal retry machinery. Gate OFF = none of this runs.
+// ══════════════════════════════════════════════════════════════════════
+function isSafetyBlockCode(code) {
+  return code === 'SAFETY_GATE' || code === 'FACT_CHECK' || code === 'FACT_CHECK_ERROR';
+}
+
+// The shared validator object (self.SafetyGate from safety-gate.js), or null
+// when the file did not load.
+function safetyGateApi() {
+  try {
+    if (typeof SafetyGate !== 'undefined' && SafetyGate && (typeof SafetyGate === 'object' || typeof SafetyGate === 'function')) return SafetyGate;
+  } catch (e) {}
+  try {
+    if (typeof self !== 'undefined' && self && self.SafetyGate) return self.SafetyGate;
+  } catch (e) {}
+  return null;
+}
+
+// Hostname only, lower case, no scheme / path / port / "www." — '' if unusable.
+function normalizeGateHost(value) {
+  let h = String(value || '').trim().toLowerCase();
+  if (!h) return '';
+  h = h.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');
+  h = h.split(/[\/?#]/)[0];
+  const at = h.lastIndexOf('@');
+  if (at >= 0) h = h.slice(at + 1);
+  h = h.replace(/:\d*$/, '').replace(/\.+$/, '').replace(/^www\d?\./, '');
+  return /^[a-z0-9\u00a1-\uffff.-]+$/.test(h) ? h : '';
+}
+
+// Internal domains for the gate and [[SITE_DOMAIN]]: the site's own host
+// first (always), then the extra domains the panel sent.
+function gateSiteDomainsOf() {
+  const job = runtime.job || {};
+  const out = [];
+  const add = (d) => {
+    const h = normalizeGateHost(d);
+    if (h && out.indexOf(h) === -1) out.push(h);
+  };
+  add(job.site && job.site.url);
+  const extra = Array.isArray(job.gateSiteDomains) ? job.gateSiteDomains : String(job.gateSiteDomains || '').split(/[\s,;]+/);
+  extra.forEach(add);
+  return out;
+}
+
+// WordPress titles arrive HTML-encoded ("Best &#8216;Pro&#8217; Pans").
+function plainPostTitle(title) {
+  const fromCode = (n) => (n > 0 && n < 0x110000) ? String.fromCodePoint(n) : '';
+  return String(title || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&#x([0-9a-f]+);/gi, (m, h) => fromCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (m, d) => fromCode(parseInt(d, 10)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function localDateYmd(d) {
+  const t = d || new Date();
+  return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
+}
+
+// ── Prompt tokens (value substitution only, never rule injection) ─────────
+// Only these five exact tokens are replaced. A prompt without tokens comes
+// back unchanged. values = { today, siteDomain, webSearch, newFaq, postTitle }.
+function substitutePromptTokens(text, values) {
+  const s = String(text || '');
+  if (s.indexOf('[[') === -1) return s;
+  const v = values || {};
+  const map = {
+    TODAY: v.today,
+    SITE_DOMAIN: v.siteDomain,
+    WEB_SEARCH: v.webSearch,
+    NEW_FAQ: v.newFaq,
+    POST_TITLE: v.postTitle
+  };
+  return s.replace(/\[\[(TODAY|SITE_DOMAIN|WEB_SEARCH|NEW_FAQ|POST_TITLE)\]\]/g, (m, key) => {
+    const val = map[key];
+    if (val === undefined || val === null) return '';
+    if (val === true) return 'yes';
+    if (val === false) return 'no';
+    return String(val);
+  });
+}
+
+// Token values for the running job. extra = { postTitle } (optional).
+function promptTokenValues(extra) {
+  const job = runtime.job || {};
+  return {
+    today: localDateYmd(),
+    siteDomain: gateSiteDomainsOf().join(', '),
+    webSearch: job.promptWebSearch === true ? 'yes' : 'no',
+    newFaq: job.gateNewFaq === 'no' ? 'no' : 'auto',
+    postTitle: (extra && extra.postTitle) ? String(extra.postTitle) : ''
+  };
+}
+
+// ── Reference original ────────────────────────────────────────────────────
+// Retries, audit retries and HTML recovery in the same run read the live post,
+// which may already be an AI edit. The gate must compare with the TRUE
+// original: the earliest backup taken in THIS run (runtime.sessionId), else
+// the fallback (the HTML this attempt read from WordPress / Fresh Recovery).
+async function sessionOriginalFor(slug, rawInput, fallbackHtml) {
+  const fallback = String(fallbackHtml || '').trim();
+  const sid = Number(runtime.sessionId) || 0;
+  if (!sid) return fallback;
+  const want = cleanSlug(slug || '');
+  const wantRaw = cleanSlug(rawInput || '');
+  let arr = [];
+  try {
+    const data = await chrome.storage.local.get('__originalsBackup');
+    arr = Array.isArray(data && data.__originalsBackup) ? data.__originalsBackup : [];
+  } catch (e) {
+    return fallback;
+  }
+  const matches = arr.filter((b) => {
+    if (!b || Number(b.sessionId) !== sid) return false;
+    const s = cleanSlug(b.slug || '');
+    if (!s || !(s === want || (wantRaw && s === wantRaw))) return false;
+    return String(b.html || '').trim().length >= 30;
+  });
+  if (!matches.length) return fallback;
+  matches.sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')));
+  return String(matches[0].html).trim();
+}
+
+// fetch() wrapper for the gate's link check: no cookies, no cache, and a hard
+// timeout so one slow site can never hold a post.
+function gateFetch(url, init) {
+  const opts = Object.assign({}, init || {});
+  const controller = (typeof AbortController === 'function') ? new AbortController() : null;
+  let timer = null;
+  if (controller) {
+    const outer = opts.signal;
+    if (outer) {
+      if (outer.aborted) controller.abort();
+      else { try { outer.addEventListener('abort', () => controller.abort()); } catch (e) {} }
+    }
+    opts.signal = controller.signal;
+    timer = setTimeout(() => { try { controller.abort(); } catch (e) {} }, 15000);
+  }
+  opts.credentials = 'omit';
+  opts.cache = 'no-store';
+  return fetch(url, opts).then((res) => {
+    if (timer) clearTimeout(timer);
+    return res;
+  }, (e) => {
+    if (timer) clearTimeout(timer);
+    throw e;
+  });
+}
+
+// The words "AUDIT ISSUES" classify rows as audit issues in the panel, so
+// they must never appear in a gate / fact-check failure message.
+function safetyMessageText(value) {
+  return String(value === undefined || value === null ? '' : value)
+    .replace(/AUDIT ISSUES/gi, 'audit problems')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function gateIssueCode(item) {
+  return (item && typeof item === 'object' && item.code) ? String(item.code) : 'GATE_ERROR';
+}
+function gateIssueMessage(item) {
+  if (item && typeof item === 'object') return safetyMessageText(item.message || item.code || '');
+  return safetyMessageText(item);
+}
+function gateIssueText(item) {
+  const msg = gateIssueMessage(item);
+  return (item && typeof item === 'object' && item.code) ? item.code + ': ' + msg : msg;
+}
+
+// Builds the SAFETY_GATE error and records the reasons on the attempt.
+function safetyGateBlockedError(links, codes, messages, warnings, removedLinks) {
+  const codeList = [];
+  (codes || []).forEach((c) => {
+    const k = String(c || '').trim();
+    if (k && codeList.indexOf(k) === -1) codeList.push(k);
+  });
+  if (!codeList.length) codeList.push('GATE_FAILED');
+  const msgs = (messages || []).map((m) => safetyMessageText(m).replace(/[.\s]+$/, '')).filter(Boolean);
+  const err = manualReviewError('SAFETY GATE BLOCKED: ' + codeList.join(', ') +
+    (msgs.length ? ' — ' + msgs.slice(0, 3).join('; ').slice(0, 700) : '') +
+    '. The post was NOT changed.');
+  err.code = 'SAFETY_GATE';
+  if (links) {
+    links.gate = {
+      codes: codeList,
+      messages: msgs.slice(0, 20).map((m) => m.slice(0, 300)),
+      warnings: (warnings || []).slice(0, 20).map((w) => safetyMessageText(w).slice(0, 300)),
+      removedLinks: (removedLinks || []).slice(0, 20).map((r) => String((r && r.url) || r || '').slice(0, 300))
+    };
+  }
+  return err;
+}
+
+// Runs the code Safety Gate on one AI edit. Returns the HTML that must be
+// saved (end markers stripped, dead new links unwrapped) or throws SAFETY_GATE.
+async function runSafetyGateStep(ctx, referenceHtml, aiHtml, label) {
+  const tag = (ctx && ctx.tag) || '';
+  const links = (ctx && ctx.attemptLinks) || null;
+  const what = label || 'AI';
+  const api = safetyGateApi();
+  if (!api || typeof api.runSafetyGate !== 'function') {
+    log('err', tag + ' 🛡 SAFETY GATE: safety-gate.js not loaded — refusing to save an unchecked edit.');
+    throw safetyGateBlockedError(links, ['GATE_NOT_LOADED'], ['safety-gate.js not loaded'], [], []);
+  }
+  const options = {
+    siteDomains: gateSiteDomainsOf(),
+    allowNewFaq: runtime.job.gateNewFaq !== 'no',
+    webSearchAllowed: runtime.job.promptWebSearch === true,
+    checkLinks: runtime.job.gateLinkCheck !== false,
+    endMarker: 'APU-END',
+    // The prompt asks for the end marker => a reply without it was cut off.
+    requireEndMarker: String(runtime.job.prompt || '').indexOf('APU-END') >= 0,
+    fetchFn: gateFetch
+  };
+  setStatus(tag + ' 🛡 Safety Gate: checking the ' + what + ' edit');
+  log('step', tag + ' 🛡 Safety Gate: checking the ' + what + ' edit (' + String(aiHtml || '').length +
+    ' chars) against the original (' + String(referenceHtml || '').length + ' chars)' +
+    (options.checkLinks ? ', new-link check ON' : '') + '.');
+  let result = null;
+  try {
+    result = await api.runSafetyGate(referenceHtml, aiHtml, options);
+  } catch (e) {
+    const m = (e && e.message) ? e.message : String(e);
+    log('err', tag + ' 🛡 Safety Gate crashed: ' + m);
+    throw safetyGateBlockedError(links, ['INTERNAL_ERROR'], ['the Safety Gate crashed: ' + m], [], []);
+  }
+  if (!result || typeof result !== 'object') {
+    throw safetyGateBlockedError(links, ['INTERNAL_ERROR'], ['the Safety Gate returned no result'], [], []);
+  }
+  const errors = Array.isArray(result.errors) ? result.errors : [];
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const removed = Array.isArray(result.removedLinks) ? result.removedLinks : [];
+  removed.forEach((r) => {
+    log('warn', tag + ' 🛡 Removed link: ' + ((r && r.url) ? r.url : String(r)) + ((r && r.reason) ? ' (' + r.reason + ')' : ''));
+  });
+  warnings.forEach((w) => log('warn', tag + ' 🛡 Gate warning — ' + gateIssueText(w)));
+  // Fail closed: anything but a clean "ok" is a block.
+  if (result.ok !== true || errors.length) {
+    errors.forEach((e) => log('err', tag + ' 🛡 Gate error — ' + gateIssueText(e)));
+    const codes = errors.map(gateIssueCode);
+    const messages = errors.map(gateIssueMessage);
+    if (!codes.length) { codes.push('GATE_FAILED'); messages.push('the Safety Gate did not approve the edit'); }
+    log('err', tag + ' 🛡 SAFETY GATE BLOCKED the ' + what + ' edit — the post is NOT changed.');
+    throw safetyGateBlockedError(links, codes, messages, warnings.map(gateIssueText), removed);
+  }
+  const html = String(result.html || '').trim();
+  if (!html) {
+    throw safetyGateBlockedError(links, ['INTERNAL_ERROR'], ['the Safety Gate returned empty HTML'], [], []);
+  }
+  log('ok', tag + ' 🛡 Safety Gate PASSED (' + html.length + ' chars' +
+    (removed.length ? ', ' + removed.length + ' link(s) removed' : '') +
+    (warnings.length ? ', ' + warnings.length + ' warning(s)' : '') + ').');
+  return html;
+}
+
+// ── Fact-Check helpers ────────────────────────────────────────────────────
+// Payload: both articles first, then the fact-check instructions (tokens
+// substituted). extra = { postTitle } (optional).
+function buildFactCheckPayload(promptText, originalHtml, editedHtml, extra) {
+  const head = (label) => '══════════════════════  ' + label + '  ══════════════════════';
+  return head('ORIGINAL ARTICLE HTML START') + '\n\n' +
+    String(originalHtml || '').trim() + '\n\n' +
+    head('ORIGINAL ARTICLE HTML END') + '\n\n\n' +
+    head('EDITED ARTICLE HTML START') + '\n\n' +
+    String(editedHtml || '').trim() + '\n\n' +
+    head('EDITED ARTICLE HTML END') + '\n\n\n' +
+    head('INSTRUCTIONS') + '\n\n' +
+    substitutePromptTokens(String(promptText || '').trim(), promptTokenValues(extra));
+}
+
+// Index of the '}' that closes the '{' at `open` (string-aware), or -1.
+function matchingBraceIndex(s, open) {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = open; i < s.length; i++) {
+    const ch = s.charAt(i);
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Checks one parsed value against the reply contract.
+function validateFactCheckObject(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, error: 'the JSON is not an object' };
+  const verdict = String(obj.verdict === undefined || obj.verdict === null ? '' : obj.verdict).trim().toLowerCase();
+  if (['pass', 'fix', 'reject'].indexOf(verdict) === -1) {
+    return { ok: false, error: 'verdict must be pass, fix or reject (got "' + String(obj.verdict === undefined ? '' : obj.verdict).slice(0, 40) + '")' };
+  }
+  let issues = obj.issues;
+  if (issues === undefined || issues === null) issues = [];
+  if (!Array.isArray(issues)) return { ok: false, error: '"issues" is not an array' };
+  return { ok: true, audit: Object.assign({}, obj, { verdict, issues }) };
+}
+
+// Reply text → { ok: true, audit } | { ok: false, error }. Tries ``` code
+// blocks first, then the text itself as JSON (a code block read from the
+// page), then the first balanced {...} that contains "verdict". Smart quotes
+// are NOT repaired (a reply that uses them is not valid JSON).
+function parseFactCheckReply(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return { ok: false, error: 'empty reply' };
+  let lastError = 'no JSON object with a "verdict" was found';
+  const tryParse = (candidate) => {
+    let obj;
+    try { obj = JSON.parse(candidate); }
+    catch (e) { lastError = 'invalid JSON (' + ((e && e.message) || 'parse error') + ')'; return null; }
+    const checked = validateFactCheckObject(obj);
+    if (!checked.ok) { lastError = checked.error; return null; }
+    return checked.audit;
+  };
+  // 1) Fenced code blocks: ```json … ``` (or a plain ``` fence).
+  const fenceRe = /```[ \t]*[A-Za-z0-9_-]*[ \t]*\r?\n?([\s\S]*?)```/g;
+  let m;
+  while ((m = fenceRe.exec(raw)) !== null) {
+    const body = String(m[1] || '').trim();
+    if (!body) continue;
+    const audit = tryParse(body);
+    if (audit) return { ok: true, audit };
+  }
+  // 2) The whole text is the JSON (maybe after a bare "json" label line).
+  const bare = raw.replace(/^json[ \t]*\r?\n/i, '').trim();
+  if (bare.charAt(0) === '{') {
+    const audit = tryParse(bare);
+    if (audit) return { ok: true, audit };
+  }
+  // 3) The first balanced {...} that contains "verdict".
+  let scanned = 0;
+  for (let i = raw.indexOf('{'); i >= 0 && scanned < 400; i = raw.indexOf('{', i + 1)) {
+    scanned++;
+    const end = matchingBraceIndex(raw, i);
+    if (end < 0) continue;
+    const candidate = raw.slice(i, end + 1);
+    if (candidate.indexOf('"verdict"') === -1) continue;
+    const audit = tryParse(candidate);
+    if (audit) return { ok: true, audit };
+    i = end;
+  }
+  return { ok: false, error: lastError };
+}
+
+// audit (parsed reply) → { action: 'pass'|'fix'|'fail', filtered }. Issues whose
+// quote is not in the edited article are dropped first (filterAuditIssues).
+// reject → fail; any remaining HIGH issue, or verdict "fix" with remaining
+// issues → fix; otherwise pass (medium/low issues are only logged).
+function decideFactCheck(audit, editedHtml, originalHtml) {
+  const verdict = String((audit && audit.verdict) || '').trim().toLowerCase();
+  const api = safetyGateApi();
+  let filtered = null;
+  if (api && typeof api.filterAuditIssues === 'function') {
+    try {
+      filtered = api.filterAuditIssues(editedHtml, audit, originalHtml ? { originalHtml } : {});
+    } catch (e) {
+      filtered = null;
+    }
+  }
+  if (!filtered) {
+    // Without the filter keep EVERY issue (conservative: more blocks, never fewer).
+    const raw = (audit && Array.isArray(audit.issues)) ? audit.issues : [];
+    filtered = {
+      verdict,
+      issues: raw.filter((i) => i && typeof i === 'object').map((i) => {
+        const sev = String(i.severity || '').trim().toLowerCase();
+        return Object.assign({}, i, { severity: (sev === 'medium' || sev === 'low') ? sev : 'high' });
+      }),
+      dropped: [],
+      valid: !!(audit && typeof audit === 'object')
+    };
+  }
+  const kept = Array.isArray(filtered.issues) ? filtered.issues : [];
+  let action = 'pass';
+  if (filtered.valid === false || ['pass', 'fix', 'reject'].indexOf(verdict) === -1 || verdict === 'reject') action = 'fail';
+  else if (kept.some((i) => String((i && i.severity) || '').toLowerCase() === 'high')) action = 'fix';
+  else if (verdict === 'fix' && kept.length > 0) action = 'fix';
+  return { action, filtered };
+}
+
+function factIssueText(issue) {
+  const clip = (v, max) => safetyMessageText(v).slice(0, max);
+  const i = issue || {};
+  const sev = String(i.severity || 'high').toUpperCase();
+  return '[' + sev + (i.category ? '/' + clip(i.category, 40) : '') + '] ' +
+    (clip(i.problem, 200) || 'problem not described') +
+    (i.quote ? ' ("' + clip(i.quote, 120) + '")' : '');
+}
+
+// The PRIORITY FIX note for the fix round (reuses the auditFixNote path).
+function buildFactCheckFixNote(filteredIssues) {
+  const issues = Array.isArray(filteredIssues) ? filteredIssues : [];
+  const clip = (v, max) => String(v === undefined || v === null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max);
+  const lines = issues.slice(0, 15).map((i, n) => {
+    const it = i || {};
+    return (n + 1) + '. [' + String(it.severity || 'high').toUpperCase() + (it.category ? ' / ' + clip(it.category, 40) : '') + '] ' +
+      'Problem: ' + (clip(it.problem, 400) || 'not described') + '.' +
+      (it.fix ? ' Fix: ' + clip(it.fix, 400) + '.' : '') +
+      (it.quote ? ' Text in your previous edit: "' + clip(it.quote, 300) + '".' : '');
+  });
+  return 'A fact-check of your previous edit of this exact article found the problems listed below. ' +
+    'Start again from the ORIGINAL article HTML above, fix every one of these problems, and keep following all other instructions exactly.\n' +
+    lines.join('\n');
+}
+
+// Small copies of issues for the attempt row (runtime.attempts is persisted).
+function compactFactIssues(list) {
+  const clip = (v, max) => String(v === undefined || v === null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max);
+  return (Array.isArray(list) ? list : []).slice(0, 12).map((i) => {
+    const it = (i && typeof i === 'object') ? i : { problem: i };
+    const out = {
+      severity: clip(it.severity, 10),
+      category: clip(it.category, 40),
+      quote: clip(it.quote, 200),
+      problem: clip(it.problem, 300),
+      fix: clip(it.fix, 300)
+    };
+    if (it.dropReason) out.dropReason = clip(it.dropReason, 80);
+    return out;
+  });
+}
+
+function factCheckError(reason, aiSessionUrl) {
+  const clean = safetyMessageText(reason || 'unknown error').replace(/[.\s]+$/, '');
+  const err = manualReviewError('FACT CHECK ERROR: ' + clean + '. The post was NOT changed.');
+  err.code = 'FACT_CHECK_ERROR';
+  err.factCheckReason = clean;
+  err.aiSessionUrl = aiSessionUrl || '';
+  return err;
+}
+
+function factCheckBlockedError(fc, afterFixRound, extraReason) {
+  const issues = Array.isArray(fc && fc.issues) ? fc.issues : [];
+  let msg = 'FACT CHECK BLOCKED: verdict "' + safetyMessageText((fc && fc.verdict) || '?') + '"' +
+    (issues.length ? ', ' + issues.length + ' issue(s)' : '') +
+    (afterFixRound ? ' after the fix round' : '');
+  if (issues.length) msg += ' — ' + issues.slice(0, 3).map(factIssueText).join('; ');
+  if (extraReason) msg += '. ' + safetyMessageText(extraReason).replace(/[.\s]+$/, '');
+  const err = manualReviewError(safetyMessageText(msg).replace(/[.\s]+$/, '') + '. The post was NOT changed.');
+  err.code = 'FACT_CHECK';
+  return err;
+}
+
+// Which AI runs the fact-check: factCheckAi (a resolved AI config) or the
+// job's own AI. Read-only — never swaps runtime.job (parallel-safe).
+function factCheckAiConfig() {
+  const job = runtime.job || {};
+  const fa = (job.factCheckAi && typeof job.factCheckAi === 'object') ? job.factCheckAi : null;
+  const src = fa || job;
+  return {
+    aiUrl: src.aiUrl || '',
+    aiName: src.aiName || (fa ? 'the fact-check AI' : 'the AI'),
+    aiMode: src.aiMode || 'web',
+    aiProvider: src.aiProvider || '',
+    aiApiBaseUrl: src.aiApiBaseUrl || '',
+    aiApiModel: src.aiApiModel || '',
+    aiApiKey: src.aiApiKey || ''
+  };
+}
+
+// The chosen fact-check prompt, else the built-in prompts/fact-check.txt.
+let factCheckPromptFileCache = '';
+async function factCheckPromptText() {
+  const own = String((runtime.job && runtime.job.factCheckPrompt) || '').trim();
+  if (own) return own;
+  if (factCheckPromptFileCache) return factCheckPromptFileCache;
+  try {
+    const res = await fetch(chrome.runtime.getURL('prompts/fact-check.txt'));
+    if (res && res.ok) {
+      const t = String(await res.text()).trim();
+      if (t) { factCheckPromptFileCache = t; return t; }
+    }
+  } catch (e) {}
+  return '';
+}
+
+// Polls the fact-check tab until the reply holds a valid JSON verdict.
+// Accepts when the AI is not generating, the reply has been stable ≥ 8 s and
+// it parses (code blocks first, then the first {...} with "verdict").
+// opts = { tag, promptText } (optional; promptText guards against reading our
+// own prompt back as the "reply").
+async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
+  const o = opts || {};
+  const tag = o.tag || '';
+  const start = Date.now();
+  const limitMs = Math.max(30000, Number(timeoutMs) || 180000);
+  const POLL_INTERVAL = 2500;
+  const MIN_WAIT_MS = 10000;
+  const STABLE_MS = 8000;
+  const STUCK_INDICATOR_MS = 75000;
+  const NO_JSON_GIVEUP_MS = 30000;
+  const NO_REPLY_GIVEUP_MS = 180000;
+  let lastKey = '';
+  let lastChangeAt = start;
+  let stoppedPolls = 0;
+  let lastLimitCheckAt = 0;
+  let lastHeartbeat = 0;
+  let lastParseError = '';
+  let everGenerated = false;
+  let lastActivityAt = start;
+  const isOwnPrompt = (text) => {
+    const t = String(text || '');
+    if (/(?:ORIGINAL|EDITED) ARTICLE HTML (?:START|END)/.test(t)) return true;
+    return !!(o.promptText && detectPromptLeak(t, o.promptText));
+  };
+  while (Date.now() - start < limitMs) {
+    while (runtime.paused && !runtime.stopRequested) await sleep(500);
+    throwIfStopped();
+    const now = Date.now();
+    const elapsed = Math.round((now - start) / 1000);
+    await pumpFrozenTab(tabId);
+    try { await runInTab(tabId, dismissBlockingDialogs); } catch (e) {}
+    let snap = null;
+    try { snap = (await runInTab(tabId, readAIJsonSnapshot, [providerKind]))?.result || null; } catch (e) {}
+    // Usage limit: same rule as the edit tab — pause the batch, not a failure.
+    if (snap?.usageLimit && limitGuardOn()) {
+      const e = new Error('AI usage limit reached — ' + String(snap.usageLimit).slice(0, 120));
+      e.code = 'AI_LIMIT';
+      e.limitText = String(snap.usageLimit).slice(0, 200);
+      throw e;
+    }
+    const generating = snap?.isGenerating === true;
+    if (generating) everGenerated = true;
+    if (!generating) stoppedPolls++; else stoppedPolls = 0;
+    let texts = Array.isArray(snap?.texts) ? snap.texts : [];
+    let messageText = String(snap?.messageText || '');
+    if (isOwnPrompt(messageText)) { texts = []; messageText = ''; }   // our own message, not the reply
+    texts = texts.filter((t) => !isOwnPrompt(t));
+    const hasReply = !!(messageText || texts.length);
+    const key = texts.join('\u0001') + '\u0002' + messageText;
+    if (key !== lastKey) { lastKey = key; lastChangeAt = now; }
+    const stableMs = now - lastChangeAt;
+    if (generating || hasReply) lastActivityAt = now;
+
+    // A limited account may leave the composer usable but never reply.
+    if (!hasReply && elapsed >= 12 && (now - lastLimitCheckAt) >= 20000) {
+      lastLimitCheckAt = now;
+      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'no fact-check reply while a limit notice is showing');
+      if (limitErr) throw limitErr;
+    }
+    if (!hasReply && !generating && (now - lastActivityAt) >= NO_REPLY_GIVEUP_MS) {
+      throw factCheckError('the fact-check AI never replied (' + elapsed + 's' + (everGenerated ? ', it started but produced no text' : '') + ')');
+    }
+
+    const settled = (!generating && stoppedPolls >= 2 && stableMs >= STABLE_MS) ||
+      (generating && stableMs >= STUCK_INDICATOR_MS);
+    if (hasReply && settled && (now - start) >= MIN_WAIT_MS) {
+      let parsed = null;
+      for (let i = 0; i < texts.length && !parsed; i++) {
+        const r = parseFactCheckReply(texts[i]);
+        if (r.ok) parsed = r; else lastParseError = r.error;
+      }
+      if (!parsed) {
+        const r = parseFactCheckReply(messageText);
+        if (r.ok) parsed = r; else lastParseError = r.error || lastParseError;
+      }
+      if (parsed) {
+        log('ok', tag + ' 🔎 Fact-check reply received (verdict "' + parsed.audit.verdict + '", ' + parsed.audit.issues.length + ' issue(s)).');
+        return parsed;
+      }
+      if (stableMs >= NO_JSON_GIVEUP_MS) {
+        const preview = messageText.replace(/\s+/g, ' ').trim().slice(0, 160);
+        throw factCheckError('the fact-check reply had no valid JSON verdict (' + lastParseError + ')' + (preview ? '. It said: "' + preview + '"' : ''));
+      }
+    }
+    if (elapsed - lastHeartbeat >= 30) {
+      lastHeartbeat = elapsed;
+      log('info', tag + ' 🔎 Fact check: waiting ' + elapsed + 's — ' +
+        (hasReply ? ('reply ' + (messageText.length || texts.join('').length) + ' chars, ' + (generating ? 'streaming' : 'settled ' + Math.round(stableMs / 1000) + 's')) : (generating ? 'AI working, no reply yet' : 'no reply yet')) + '.');
+    }
+    setStatus(tag + ' 🔎 Fact check: ' + (generating ? 'AI working' : (hasReply ? 'reading the verdict' : 'waiting for the reply')) + '... (' + elapsed + 's)');
+    await sleep(POLL_INTERVAL);
+  }
+  throw factCheckError('no fact-check JSON within ' + Math.round(limitMs / 1000) + 's' + (lastParseError ? ' (' + lastParseError + ')' : ''));
+}
+
+// Browser mode: the fact-check always runs in a NEW chat tab of `ai`, with
+// the same keep-alive / composer-ready / model-limit handling as the edit
+// tab. The tab is always closed afterwards. instructionsText = the prompt as
+// sent (tokens substituted); it only guards against reading it back.
+async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) {
+  if (!ai.aiUrl) throw factCheckError('the fact-check AI has no web address');
+  const providerKind = detectProviderKind(ai.aiUrl);
+  const allowWebSearch = runtime.job.promptWebSearch === true;
+  let tabId = null;
+  let sessionUrl = '';
+  try {
+    await ensureWorkerWindowUsable();
+    const tab = await createWorkTab(ai.aiUrl);
+    tabId = tab.id;
+    sessionUrl = canonicalizeAISessionUrl(tab.url || '', providerKind, ai.aiUrl);
+    // Before the readiness wait, never after it.
+    await installAITabKeepAlive(tabId);
+    await reviveHiddenWindowFor(tabId, 'opening the fact-check AI tab');
+    const ready = await waitForAIComposerReady(tabId, providerKind === 'claude' ? 150000 : 90000, providerKind);
+    if (!ready.ok) {
+      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'the fact-check chat box never became usable');
+      if (limitErr) throw limitErr;
+      throw factCheckError(ai.aiName + ' is not ready: ' + ready.error);
+    }
+    const prep = await prepareProviderForEditing(tabId, providerKind, allowWebSearch);
+    if (prep?.changed) log('info', tag + ' Fact check: disabled ' + prep.changed + ' research/search toggle(s) in ' + ai.aiName);
+    // MODEL LIMIT — before the paste, while the composer is still empty.
+    {
+      const limited = await checkAIModelLimit(tabId, providerKind, tag);
+      if (limited) throw modelLimitError(limited, ai.aiName);
+    }
+    if (providerKind === 'gemini') {
+      const flashLimited = await checkGeminiFlashLimit(tabId, tag);
+      if (flashLimited) throw modelLimitError({ kind: 'gemini-flash', evidence: flashLimited.reason + (flashLimited.offered ? ' (offered: ' + flashLimited.offered + ')' : '') }, ai.aiName);
+      await enforceGeminiFlashThinking(tabId, tag);
+    }
+    await sleep(1800);
+    setStatus(tag + ' 🔎 Fact check: sending both versions to ' + ai.aiName);
+    const sendResult = await sendPromptToAI(tabId, payload, providerKind, { tag });
+    if (!sendResult.ok) {
+      if (sendResult.stopped) throwIfStopped();
+      if (sendResult.limited) throw modelLimitError(sendResult.limitDetection, ai.aiName);
+      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'the fact-check prompt could not be sent');
+      if (limitErr) throw limitErr;
+      throw factCheckError('the fact-check prompt was not sent: ' + sendResult.error);
+    }
+    sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl);
+    log('ok', tag + ' 🔎 Fact-check prompt sent through ' + sendResult.method + ' — waiting for the JSON verdict.');
+    const parsed = await waitForFactCheckJson(tabId, timeoutMs, providerKind, { tag, promptText: instructionsText });
+    sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl);
+    return { parsed, aiSessionUrl: sessionUrl };
+  } catch (e) {
+    if (tabId) {
+      try { sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl); } catch (e2) {}
+    }
+    if (e && typeof e === 'object' && !e.aiSessionUrl) e.aiSessionUrl = sessionUrl;
+    throw e;
+  } finally {
+    if (tabId) {
+      try { await safeCloseTab(tabId); } catch (e) {}
+    }
+  }
+}
+
+// One AI Fact-Check round → { verdict, issues, dropped, aiSessionUrl, action }.
+// ctx = { tag, referenceHtml (or originalHtml), editedHtml (or aiHtml),
+// attemptLinks, wpItem, fixRound }. Technical failures throw FACT_CHECK_ERROR;
+// MODEL_LIMIT / AI_LIMIT / USER_STOPPED keep their own codes (pause / stop).
+async function runFactCheck(ctx) {
+  const c = ctx || {};
+  const tag = c.tag || '';
+  const reference = String(c.referenceHtml || c.originalHtml || '');
+  const edited = String(c.editedHtml || c.aiHtml || '');
+  throwIfStopped();
+  const ai = factCheckAiConfig();
+  const promptText = await factCheckPromptText();
+  if (!promptText) throw factCheckError('no fact-check prompt is available (the chosen prompt is empty and prompts/fact-check.txt could not be read)');
+  const postTitle = (c.attemptLinks && c.attemptLinks.postTitle) || plainPostTitle(c.wpItem && c.wpItem.title);
+  const payload = buildFactCheckPayload(promptText, reference, edited, { postTitle });
+  const timeoutMs = Math.max(30, Number(runtime.job.aiTimeout) || 180) * 1000;
+  setStatus(tag + ' 🔎 Fact check with ' + ai.aiName);
+  log('step', tag + ' 🔎 Fact check' + (c.fixRound ? ' (after the fix round)' : '') + ': asking ' + ai.aiName +
+    ' in a NEW ' + ((ai.aiMode && ai.aiMode !== 'web') ? 'API request' : 'chat') + ' (' + payload.length + ' chars).');
+  let parsed = null;
+  let aiSessionUrl = '';
+  try {
+    if (ai.aiMode && ai.aiMode !== 'web') {
+      const apiCfg = Object.assign({}, ai, {
+        systemText: 'You are a meticulous fact-checker. Follow the instructions exactly and reply with ONE ```json code block and nothing else.'
+      });
+      const apiResult = await callAIProviderAPI(payload, timeoutMs, apiCfg);
+      parsed = parseFactCheckReply(apiResult.text);
+      if (!parsed.ok) {
+        throw factCheckError('the fact-check reply had no valid JSON verdict (' + parsed.error + ')' +
+          (apiResult.truncated ? ' — the reply hit the API max-token limit' : ''));
+      }
+      log('ok', tag + ' 🔎 Fact-check reply received (verdict "' + parsed.audit.verdict + '", ' + parsed.audit.issues.length + ' issue(s)).');
+    } else {
+      const instructions = substitutePromptTokens(promptText, promptTokenValues({ postTitle }));
+      const r = await runFactCheckInTab(ai, payload, instructions, tag, timeoutMs);
+      parsed = r.parsed;
+      aiSessionUrl = r.aiSessionUrl || '';
+    }
+  } catch (e) {
+    if (e && (e.code === 'MODEL_LIMIT' || e.code === 'AI_LIMIT' || e.code === 'USER_STOPPED' || e.code === 'FACT_CHECK_ERROR')) throw e;
+    throw factCheckError((e && e.message) || String(e), (e && e.aiSessionUrl) || aiSessionUrl);
+  }
+  const decision = decideFactCheck(parsed.audit, edited, reference);
+  const filtered = decision.filtered || {};
+  return {
+    verdict: parsed.audit.verdict,
+    issues: Array.isArray(filtered.issues) ? filtered.issues : [],
+    dropped: Array.isArray(filtered.dropped) ? filtered.dropped : [],
+    aiSessionUrl,
+    action: decision.action,
+    aiName: ai.aiName
+  };
+}
+
+// Fix round: regenerate from the ORIGINAL (reference) HTML in a NEW chat with
+// the issues as this attempt's PRIORITY FIX note. Never a recovery read.
+async function regenerateForFactCheckFix(ctx, referenceHtml, note) {
+  const tag = ctx.tag || '';
+  const links = ctx.attemptLinks || {};
+  const tabs = ctx.attemptTabs || { edit: null, ai: null };
+  const fixLinks = Object.assign({}, links, {
+    recoverFromUrl: '',
+    recoverProviderUrl: '',
+    auditFixNote: (links.auditFixNote ? links.auditFixNote + '\n\n' : '') + note
+  });
+  try {
+    const html = await generateHtmlForArticle(tag + ' fix', ctx.num, ctx.total, referenceHtml, fixLinks, tabs, ctx.stepNo || 4);
+    await sleep((runtime.job.settleTime || 3) * 1000);
+    return html;
+  } finally {
+    // The fix-round chat is now this attempt's AI session (Failed-box link).
+    if (fixLinks.aiSessionUrl && fixLinks.aiSessionUrl !== links.aiSessionUrl) {
+      links.aiSessionUrl = fixLinks.aiSessionUrl;
+      links.aiProviderUrl = runtime.job.aiUrl || links.aiProviderUrl;
+    }
+    if (tabs.ai) {
+      log('step', tag + ' Closing the fix-round AI tab');
+      try { await safeCloseTab(tabs.ai); } catch (e) {}
+      tabs.ai = null;
+      await sleep(700);
+    }
+  }
+}
+
+// THE HOOK (processSlug, both branches, before ANY write). Returns the final
+// HTML to save. ctx = { slug, tag, num, total, originalHtml, aiHtml,
+// attemptLinks, attemptTabs, wpItem, stepNo }. Gate OFF → aiHtml unchanged.
+async function applySafetyPipeline(ctx) {
+  if (!safetyGateOn()) return ctx.aiHtml;
+  const tag = ctx.tag || '';
+  const links = ctx.attemptLinks || {};
+  // 1) Compare with the TRUE original of this run (not an already-edited post).
+  const reference = await sessionOriginalFor(ctx.slug, links.rawInput, ctx.originalHtml);
+  if (reference !== String(ctx.originalHtml || '').trim()) {
+    log('info', tag + ' 🛡 Safety Gate reference = the ORIGINAL backup taken earlier in this run (' + reference.length + ' chars), not the current WordPress content.');
+  }
+  // 2-4) Code Safety Gate (not relaxed by any recovery / any-code mode).
+  let html = await runSafetyGateStep(ctx, reference, ctx.aiHtml, 'AI');
+  if (!factCheckOn()) return html;
+
+  // 5) AI Fact-Check, with at most ONE fix round per attempt.
+  let fixRoundUsed = false;
+  for (;;) {
+    let fc = null;
+    try {
+      fc = await runFactCheck(Object.assign({}, ctx, { referenceHtml: reference, editedHtml: html, fixRound: fixRoundUsed }));
+    } catch (e) {
+      if (!e || e.code !== 'FACT_CHECK_ERROR') throw e;
+      links.factCheck = {
+        verdict: 'error',
+        error: String(e.factCheckReason || e.message || '').slice(0, 300),
+        issues: [],
+        dropped: [],
+        aiSessionUrl: e.aiSessionUrl || '',
+        fixRound: fixRoundUsed
+      };
+      if (runtime.job.factCheckOnError === 'save') {
+        log('warn', tag + ' 🔎 The fact check itself failed (' + (e.factCheckReason || e.message) + ') — saving the gate-approved edit anyway (setting: if the fact check breaks → save).');
+        return html;
+      }
+      log('err', tag + ' 🔎 The fact check itself failed (' + (e.factCheckReason || e.message) + ') — keeping the original (setting: if the fact check breaks → keep original).');
+      throw e;
+    }
+    links.factCheck = {
+      verdict: fc.verdict,
+      issues: compactFactIssues(fc.issues),
+      dropped: compactFactIssues(fc.dropped),
+      aiSessionUrl: fc.aiSessionUrl || '',
+      fixRound: fixRoundUsed
+    };
+    if (fc.dropped.length) {
+      log('info', tag + ' 🔎 Fact check: ignored ' + fc.dropped.length + ' issue(s) whose quote is not in the edited article.');
+    }
+    if (fc.action === 'pass') {
+      fc.issues.forEach((i) => log('info', tag + ' 🔎 Minor: ' + factIssueText(i)));
+      log('ok', tag + ' 🔎 Fact check PASSED (verdict "' + fc.verdict + '"' + (fixRoundUsed ? ', after one fix round' : '') + ').');
+      return html;
+    }
+    fc.issues.forEach((i) => log('warn', tag + ' 🔎 ' + factIssueText(i)));
+    if (fc.action === 'fail' || fixRoundUsed) {
+      log('err', tag + ' 🔎 FACT CHECK BLOCKED the edit (verdict "' + fc.verdict + '"' + (fixRoundUsed ? ', after the fix round' : '') + ') — the post is NOT changed.');
+      throw factCheckBlockedError(fc, fixRoundUsed);
+    }
+    // 2.6) Fix round: once per attempt, from the ORIGINAL, in a NEW chat.
+    fixRoundUsed = true;
+    const note = buildFactCheckFixNote(fc.issues);
+    log('step', tag + ' 🔧 Fact-check fix round: regenerating from the ORIGINAL article in a NEW chat with ' +
+      fc.issues.length + ' issue(s) attached as a PRIORITY FIX note.');
+    setStatus(tag + ' 🔧 Fact-check fix round');
+    let fixedHtml = '';
+    try {
+      fixedHtml = await regenerateForFactCheckFix(ctx, reference, note);
+    } catch (e) {
+      // Limits / Stop keep their meaning; anything else fails the post here.
+      if (e && e.code) throw e;
+      log('err', tag + ' 🔧 Fix round failed: ' + ((e && e.message) || e));
+      throw factCheckBlockedError(fc, false, 'The fix round could not produce a new version (' + ((e && e.message) || e) + ')');
+    }
+    log('step', tag + ' 🔧 Fix round returned ' + fixedHtml.length + ' chars — running the Safety Gate and the fact check again.');
+    html = await runSafetyGateStep(ctx, reference, fixedHtml, 'fix-round');
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // PROVIDER DETECTION
 // ══════════════════════════════════════════════════════════════════════
 function detectProviderKind(url) {
@@ -4787,11 +5704,12 @@ function splitHtmlByHeadings(html, maxChars) {
   return chunks.length ? chunks : [html];
 }
 
-function buildChunkPayload(promptText, chunkHtml, partNo, total) {
+function buildChunkPayload(promptText, chunkHtml, partNo, total, extra) {
   return 'You are editing PART ' + partNo + ' of ' + total + ' of one larger WordPress article. ' +
     'Edit ONLY this part and reply with ONLY this part as raw HTML. Do NOT add <html>, <head> or <body> wrappers, do NOT repeat any other part, and do NOT add a whole-article intro or conclusion here.\n\n' +
     'Here is PART ' + partNo + ' HTML:\n```html\n' + String(chunkHtml || '').trim() + '\n```\n\n' +
-    'Editing instructions:\n' + String(promptText || '').trim() + '\n\n' +
+    // v3.46.0: only the [[TOKENS]] present in the saved prompt are replaced.
+    'Editing instructions:\n' + substitutePromptTokens(String(promptText || '').trim(), promptTokenValues(extra)) + '\n\n' +
     'Reply with the edited HTML of this part inside one fenced code block that starts with ```html and ends with ```.';
 }
 
@@ -4811,7 +5729,7 @@ async function generateHtmlForArticleChunked(tag, num, total, originalHtml, atte
       stopped();
       setStatus(tag + ' Auto-split: ' + runtime.job.aiName + ' API part ' + (ci + 1) + '/' + chunks.length);
       log('step', tag + ' Part ' + (ci + 1) + '/' + chunks.length + ': calling ' + runtime.job.aiName + ' API');
-      const apiResult = await callAIProviderAPI(buildChunkPayload(chunkPrompt, chunks[ci], ci + 1, chunks.length), runtime.job.aiTimeout * 1000);
+      const apiResult = await callAIProviderAPI(buildChunkPayload(chunkPrompt, chunks[ci], ci + 1, chunks.length, { postTitle: attemptLinks?.postTitle }), runtime.job.aiTimeout * 1000);
       if (apiResult.truncated) throw new Error('Auto-split part ' + (ci + 1) + ' hit the API max-token limit. Lower the article size or raise max tokens.');
       const partHtml = extractHtmlFromAIText(apiResult.text);
       if (!partHtml || partHtml.length < 40) throw new Error('Auto-split part ' + (ci + 1) + ' returned no HTML.');
@@ -4831,14 +5749,14 @@ async function generateHtmlForArticleChunked(tag, num, total, originalHtml, atte
       if (limitErr) throw limitErr;
       throw manualReviewError(runtime.job.aiName + ' is not ready: ' + ready.error);
     }
-    await prepareProviderForEditing(aiTab.id, providerKind);
+    await prepareProviderForEditing(aiTab.id, providerKind, !!runtime.job.promptWebSearch);
     if (providerKind === 'gemini') await enforceGeminiFlashThinking(aiTab.id, tag);
     await sleep(1500);
     for (let ci = 0; ci < chunks.length; ci++) {
       stopped();
       setStatus(tag + ' Auto-split: part ' + (ci + 1) + '/' + chunks.length + ' to ' + runtime.job.aiName);
       log('step', tag + ' Part ' + (ci + 1) + '/' + chunks.length + ': sending to ' + runtime.job.aiName);
-      const sendResult = await sendPromptToAI(aiTab.id, buildChunkPayload(chunkPrompt, chunks[ci], ci + 1, chunks.length), providerKind, { tag });
+      const sendResult = await sendPromptToAI(aiTab.id, buildChunkPayload(chunkPrompt, chunks[ci], ci + 1, chunks.length, { postTitle: attemptLinks?.postTitle }), providerKind, { tag });
       if (!sendResult.ok) throw manualReviewError('Auto-split part ' + (ci + 1) + ' was not sent: ' + sendResult.error);
       attemptLinks.aiSessionUrl = await refreshAISessionUrl(aiTab.id, attemptLinks.aiSessionUrl, providerKind, runtime.job.aiUrl);
       const partHtml = await waitForAIResponse(aiTab.id, runtime.job.aiTimeout * 1000, num, total, chunks[ci], chunkPrompt, runtime.job.strictMode, providerKind);
@@ -4942,9 +5860,26 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
     ? '\n\n══════════════  PRIORITY FIX (from the last audit of this article)  ══════════════\n' + attemptLinks.auditFixNote
     : '');
   if (shouldAutoSplit(originalHtml)) {
-    return await generateHtmlForArticleChunked(tag, num, total, originalHtml, attemptLinks, attemptTabs, stepNo, jobPrompt);
+    const splitHtml = await generateHtmlForArticleChunked(tag, num, total, originalHtml, attemptLinks, attemptTabs, stepNo, jobPrompt);
+    // v3.46.0: with the Safety Gate on, the RE-JOINED whole article also has
+    // to pass the size/leak check and the completeness check (each part was
+    // only checked against its own chunk before).
+    if (safetyGateOn()) {
+      const joinedVerify = verifyHtml(splitHtml, originalHtml, runtime.job.prompt, runtime.job.strictMode);
+      if (!joinedVerify.ok) {
+        throw manualReviewError('Refused to save — the re-joined auto-split article failed verification (' + joinedVerify.reason + '). The post was NOT changed.');
+      }
+      const joinedComp = completenessOptions();  // honor the user's completeness setting (null = Off)
+      if (joinedComp) {
+        const joinedAssess = assessHtmlCompleteness(splitHtml, originalHtml, joinedComp);
+        if (!joinedAssess.complete) {
+          throw manualReviewError('Refused to save — the re-joined auto-split article looked incomplete (' + joinedAssess.reasons.join('; ') + '). The post was NOT changed.');
+        }
+      }
+    }
+    return splitHtml;
   }
-  const payload = buildAIPayload(jobPrompt, originalHtml);
+  const payload = buildAIPayload(jobPrompt, originalHtml, { postTitle: attemptLinks && attemptLinks.postTitle });
   if (isApiAIJob()) {
     attemptLinks.aiSessionUrl = '';
     setStatus(tag + ' Calling ' + runtime.job.aiName + ' API');
@@ -4988,7 +5923,7 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
     if (limitErr) throw limitErr;
     throw manualReviewError(runtime.job.aiName + ' is not ready: ' + aiReady.error);
   }
-  const prep = await prepareProviderForEditing(aiTab.id, providerKind);
+  const prep = await prepareProviderForEditing(aiTab.id, providerKind, !!runtime.job.promptWebSearch);
   if (prep?.changed) log('info', tag + ' Disabled ' + prep.changed + ' research/search toggle(s) in ' + runtime.job.aiName);
   // MODEL LIMIT — before the paste, while the composer is still empty.
   {
@@ -5057,11 +5992,15 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
   }
 }
 
-async function callAIProviderAPI(promptText, timeoutMs) {
-  const provider = runtime.job.aiProvider || runtime.job.aiMode;
-  if (provider === 'gemini') return callGeminiAPI(promptText, timeoutMs);
-  if (provider === 'anthropic') return callAnthropicAPI(promptText, timeoutMs);
-  return callOpenAICompatibleAPI(promptText, timeoutMs);
+// aiCfg (optional, v3.46.0): a resolved AI config ({aiMode, aiProvider,
+// aiApiBaseUrl, aiApiModel, aiApiKey, systemText}) used instead of the job's
+// own AI, e.g. by the Fact-Check round. Omitted = the job's AI, as before.
+async function callAIProviderAPI(promptText, timeoutMs, aiCfg) {
+  const cfg = aiCfg || runtime.job;
+  const provider = cfg.aiProvider || cfg.aiMode;
+  if (provider === 'gemini') return callGeminiAPI(promptText, timeoutMs, aiCfg);
+  if (provider === 'anthropic') return callAnthropicAPI(promptText, timeoutMs, aiCfg);
+  return callOpenAICompatibleAPI(promptText, timeoutMs, aiCfg);
 }
 
 async function fetchJsonWithTimeout(url, options, timeoutMs) {
@@ -5089,8 +6028,8 @@ async function fetchJsonWithTimeout(url, options, timeoutMs) {
   return data;
 }
 
-function apiBaseUrl(defaultUrl) {
-  return String(runtime.job.aiApiBaseUrl || defaultUrl || '').replace(/\/+$/, '');
+function apiBaseUrl(defaultUrl, aiCfg) {
+  return String((aiCfg || runtime.job).aiApiBaseUrl || defaultUrl || '').replace(/\/+$/, '');
 }
 
 function apiMaxTokens() {
@@ -5098,14 +6037,15 @@ function apiMaxTokens() {
   return Number.isFinite(n) && n > 0 ? Math.min(n, 200000) : 16000;
 }
 
-async function callOpenAICompatibleAPI(promptText, timeoutMs) {
-  const key = runtime.job.aiApiKey;
-  const model = runtime.job.aiApiModel;
-  const base = apiBaseUrl('https://api.openai.com/v1');
+async function callOpenAICompatibleAPI(promptText, timeoutMs, aiCfg) {
+  const cfg = aiCfg || runtime.job;
+  const key = cfg.aiApiKey;
+  const model = cfg.aiApiModel;
+  const base = apiBaseUrl('https://api.openai.com/v1', aiCfg);
   if (!key || !model) throw new Error('OpenAI-compatible API needs a model and API key.');
   const endpoint = /\/chat\/completions$/i.test(base) ? base : base + '/chat/completions';
   const messages = [
-    { role: 'system', content: 'Return only the complete updated WordPress article HTML. No explanations.' },
+    { role: 'system', content: (aiCfg && aiCfg.systemText) || 'Return only the complete updated WordPress article HTML. No explanations.' },
     { role: 'user', content: promptText }
   ];
   const request = (body) => fetchJsonWithTimeout(endpoint, {
@@ -5138,10 +6078,11 @@ async function callOpenAICompatibleAPI(promptText, timeoutMs) {
   return { text, truncated: /length|max_tokens|max_output/i.test(String(finish)) };
 }
 
-async function callGeminiAPI(promptText, timeoutMs) {
-  const key = runtime.job.aiApiKey;
-  const model = runtime.job.aiApiModel;
-  const base = apiBaseUrl('https://generativelanguage.googleapis.com/v1beta');
+async function callGeminiAPI(promptText, timeoutMs, aiCfg) {
+  const cfg = aiCfg || runtime.job;
+  const key = cfg.aiApiKey;
+  const model = cfg.aiApiModel;
+  const base = apiBaseUrl('https://generativelanguage.googleapis.com/v1beta', aiCfg);
   if (!key || !model) throw new Error('Gemini API needs a model and API key.');
   const endpoint = base + '/models/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(key);
   const data = await fetchJsonWithTimeout(endpoint, {
@@ -5165,10 +6106,11 @@ async function callGeminiAPI(promptText, timeoutMs) {
   return { text, truncated: /max_tokens|max_output/i.test(String(finishReason)) };
 }
 
-async function callAnthropicAPI(promptText, timeoutMs) {
-  const key = runtime.job.aiApiKey;
-  const model = runtime.job.aiApiModel;
-  const base = apiBaseUrl('https://api.anthropic.com/v1');
+async function callAnthropicAPI(promptText, timeoutMs, aiCfg) {
+  const cfg = aiCfg || runtime.job;
+  const key = cfg.aiApiKey;
+  const model = cfg.aiApiModel;
+  const base = apiBaseUrl('https://api.anthropic.com/v1', aiCfg);
   if (!key || !model) throw new Error('Claude API needs a model and API key.');
   const endpoint = /\/messages$/i.test(base) ? base : base + '/messages';
   const data = await fetchJsonWithTimeout(endpoint, {
@@ -5647,20 +6589,63 @@ function cleanExtractedArticle(text) {
   // Trim any non-HTML preamble (e.g. a "HTML" code-box label or leftover
   // commentary) and trailing chatter: keep from the first HTML comment or tag
   // through the final '>'.
-  const start = s.search(/<!--|<\/?(?:!doctype\s+html|html|article|section|main|header|div|p|h[1-6]|ul|ol|li|table|thead|tbody|tfoot|tr|td|th|figure|img|a|blockquote|script)\b/i);
+  let start = s.search(/<!--|<\/?(?:!doctype\s+html|html|article|section|main|header|div|p|h[1-6]|ul|ol|li|table|thead|tbody|tfoot|tr|td|th|figure|img|a|blockquote|script)\b/i);
+  // v3.46.0 BUG FIX: a shortcode that opens the article ([toc], a page
+  // builder's [et_pb_section ...]) sits before the first tag and used to be
+  // cut off. A shortcode at the start of a line now counts as the start too.
+  // (A code fence between the two means the "shortcode" is chat text outside
+  // the code block, so it is ignored.)
+  const shortcodeStart = leadingShortcodeIndex(s);
+  if (shortcodeStart >= 0 && (start < 0 || (shortcodeStart < start && s.slice(shortcodeStart, start).indexOf('```') < 0))) start = shortcodeStart;
   if (start >= 0) {
     const lower = s.toLowerCase();
     const closeHtml = lower.lastIndexOf('</html>');
     const lastGt = s.lastIndexOf('>');
-    const end = closeHtml > start ? closeHtml + 7 : (lastGt > start ? lastGt + 1 : s.length);
+    let end = closeHtml > start ? closeHtml + 7 : (lastGt > start ? lastGt + 1 : s.length);
+    // v3.46.0 BUG FIX: keep closing shortcodes after the last '>' as well
+    // ([related_posts], [/et_pb_section]) instead of dropping them.
+    if (!(closeHtml > start) && lastGt > start) end = trailingShortcodeEnd(s, end);
     s = s.slice(start, end);
   }
   return s.trim();
 }
 
+// Index of the first shortcode ([name ...] or [/name]) that starts a line, or
+// -1. Markdown links "[text](url)" and one-letter "[x]" boxes are not shortcodes.
+function leadingShortcodeIndex(s) {
+  const re = /(^|\n)([ \t]*)\[\/?[a-z][a-z0-9_-]+(?=[ \t\]\/])[^\]\[\n]{0,2000}\](?!\()/i;
+  const m = re.exec(String(s || ''));
+  return m ? m.index + m[1].length + m[2].length : -1;
+}
+
+// Extends an article end past trailing lines that are shortcodes (e.g.
+// "[related_posts]" or "[embed]url[/embed]" after the last tag). Stops at a
+// code fence so chat text after the code block is never included.
+function trailingShortcodeEnd(s, end) {
+  const tail = String(s || '').slice(end);
+  if (tail.indexOf('[') < 0) return end;
+  const lines = tail.split('\n');
+  let pos = end;
+  let best = end;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    if (/^```/.test(t)) break;
+    if (/^\[\/?[a-z][a-z0-9_-]+(?=[ \t\]\/])/i.test(t) && /\]$/.test(t) && !/\]\(/.test(t)) {
+      best = pos + line.replace(/\s+$/, '').length;
+    }
+    pos += line.length + 1;
+  }
+  return best;
+}
+
 function findFinalHtmlOutputCut(text) {
   const s = String(text || '');
-  const re = /(?:^|\n)\s*(?:#+\s*)?(?:\d+\.\s*)?(?:(?:COMPLETE|FINAL|UPDATED|REVISED|FIXED)[ \t]+)*(?:BODY-ONLY[ \t]+)?(?:ARTICLE[ \t]+)?HTML\b[^\n]*|FIXED[ \t]+ARTICLE/ig;
+  // v3.46.0 BUG FIX: the "FIXED ARTICLE" divider must start its own line
+  // (only decoration such as ──, ##, ** or "2." / "PART 2 —" before it). It
+  // used to match anywhere, so an article containing "a fixed article of
+  // clothing" lost everything before that phrase.
+  const re = /(?:^|\n)\s*(?:#+\s*)?(?:\d+\.\s*)?(?:(?:COMPLETE|FINAL|UPDATED|REVISED|FIXED)[ \t]+)*(?:BODY-ONLY[ \t]+)?(?:ARTICLE[ \t]+)?HTML\b[^\n]*|(?:^|\n)[^A-Za-z0-9<\n]{0,40}(?:\d+\.[^A-Za-z0-9<\n]{0,10})?(?:PART[ \t]+\d+[^A-Za-z0-9<\n]{0,10})?FIXED[ \t]+ARTICLE\b[^<\n]*/ig;
   let m, cut = -1;
   while ((m = re.exec(s)) !== null) cut = m.index + m[0].length;
   return cut;
@@ -5737,16 +6722,20 @@ function manualReviewError(message) {
 // ══════════════════════════════════════════════════════════════════════
 // PROMPT PAYLOAD
 // ══════════════════════════════════════════════════════════════════════
-function buildAIPayload(promptText, sourceHtml) {
+function buildAIPayload(promptText, sourceHtml, extra) {
   // Keep the user's saved prompt authoritative. The transport wrapper only
   // separates source HTML from instructions; it must not inject editing rules
   // that the user did not save.
+  // v3.46.0: [[TODAY]], [[SITE_DOMAIN]], [[WEB_SEARCH]], [[NEW_FAQ]] and
+  // [[POST_TITLE]] are substituted when the saved prompt contains them (value
+  // substitution only — a prompt without tokens is sent exactly as before).
+  // extra = { postTitle } (optional).
   const head = (label) => '══════════════════════  ' + label + '  ══════════════════════';
   return head('ARTICLE HTML START') + '\n\n' +
     String(sourceHtml || '').trim() + '\n\n' +
     head('ARTICLE HTML END') + '\n\n\n' +
     head('INSTRUCTIONS') + '\n\n' +
-    String(promptText || '').trim();
+    substitutePromptTokens(String(promptText || '').trim(), promptTokenValues(extra));
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -6883,9 +7872,12 @@ function checkUpdateSuccess() {
 // ══════════════════════════════════════════════════════════════════════
 // AI PROVIDER PAGE INSPECTION
 // ══════════════════════════════════════════════════════════════════════
-function prepareAIProviderPage(providerKind) {
+function prepareAIProviderPage(providerKind, allowWebSearch) {
   // Applies to all providers: find any ACTIVE search/research/browse/web toggle
   // and switch it off so the AI edits the pasted article offline.
+  // v3.46.0: allowWebSearch === true (the prompt allows web search) keeps plain
+  // search / web / browse toggles as they are and only switches OFF deep
+  // research / research / deep search / agent modes.
   function visible(el) {
     const r = el?.getBoundingClientRect?.();
     return !!r && (r.width > 0 && r.height > 0 || (window.innerWidth || 0) < 500 || !document.documentElement?.getBoundingClientRect().width);
@@ -6899,10 +7891,13 @@ function prepareAIProviderPage(providerKind) {
     ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
   }
   let changed = 0;
+  const offPattern = allowWebSearch === true
+    ? /\b(deepsearch|deep search|deep research|research|agent|agent mode)\b/
+    : /\b(search|deepsearch|deep search|research|browse|web)\b/;
   const controls = [...document.querySelectorAll('button, [role="button"], input[type="checkbox"]')].filter(visible);
   controls.forEach((el) => {
     const label = labelOf(el);
-    if (!/\b(search|deepsearch|deep search|research|browse|web)\b/.test(label)) return;
+    if (!offPattern.test(label)) return;
     const pressed = el.getAttribute('aria-pressed') === 'true' ||
       el.getAttribute('aria-checked') === 'true' ||
       el.classList?.contains?.('active') ||
@@ -8414,6 +9409,129 @@ function readAICodeSnapshot(providerKind) {
     hasCodeCard: hasCodeCard,
     assistantLen: aText.length,
     assistantPreview: aText.slice(0, 200),
+    usageLimit: usageLimitHit()
+  };
+}
+
+// Runs in the AI tab (v3.46.0 Fact-Check). SELF-CONTAINED on purpose: the
+// last-assistant-message selectors, the still-generating signals and the
+// usage-limit detector are copied from readAICodeSnapshot, because injected
+// functions cannot share code. Returns the code-block texts of the LAST
+// assistant message and its whole text, for the JSON verdict.
+function readAIJsonSnapshot(providerKind) {
+  function visible(el) {
+    const r = el?.getBoundingClientRect?.();
+    return !!r && (r.width > 0 && r.height > 0 || (window.innerWidth || 0) < 500 || !document.documentElement?.getBoundingClientRect().width);
+  }
+
+  // ── Provider-specific assistant-message locators (as readAICodeSnapshot) ─
+  function findLastAssistantMessage() {
+    let nodes = [];
+    if (providerKind === 'chatgpt') {
+      nodes = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+      if (nodes.length === 0) {
+        nodes = [...document.querySelectorAll('article[data-testid^="conversation-turn"]')];
+      }
+    } else if (providerKind === 'claude') {
+      nodes = [...document.querySelectorAll(
+        '[data-is-streaming], [data-test-render-count], [data-testid*="message" i], [data-testid*="conversation" i], [class*="font-claude" i], [class*="prose" i], [class*="markdown" i], [class*="message" i]'
+      )].filter(el => {
+        if (!visible(el)) return false;
+        if (el.querySelector?.('[data-blogedit-composer="1"]')) return false;
+        const text = (el.innerText || el.textContent || '').trim();
+        return text.length > 20 || el.querySelector('pre, code');
+      });
+    } else if (providerKind === 'gemini') {
+      nodes = [...document.querySelectorAll('message-content, model-response, [class*="model-response" i]')];
+    } else if (providerKind === 'grok') {
+      nodes = [...document.querySelectorAll('[class*="message-bubble" i], [class*="response-content" i]')];
+    } else if (providerKind === 'deepseek') {
+      nodes = [...document.querySelectorAll('[class*="message" i][class*="assistant" i], .markdown')];
+    }
+    nodes = nodes.filter(visible);
+    return nodes[nodes.length - 1] || null;
+  }
+
+  // ── Still-generating signal (as readAICodeSnapshot) ─────────────────────
+  function isGenerating() {
+    const stopSelectors = [
+      'button[data-testid="stop-button"]',
+      'button[aria-label="Stop"]',
+      'button[aria-label="Stop streaming"]',
+      'button[aria-label*="stop generating" i]',
+      'button[aria-label*="stop response" i]',
+      'button[aria-label*="stop streaming" i]',
+      'button[aria-label*="stop model" i]',
+      'button[title*="stop generating" i]',
+      'button[title*="stop response" i]'
+    ];
+    if ([...document.querySelectorAll(stopSelectors.join(','))].some(el => visible(el) && !el.disabled)) {
+      return true;
+    }
+    if (document.querySelector('[data-is-streaming="true"]')) return true;
+    if (providerKind === 'chatgpt' && document.querySelector('.result-streaming')) return true;
+    if (providerKind === 'gemini' && document.querySelector('[class*="loading-indicator" i]')) return true;
+    return [...document.querySelectorAll('button')].some(el => {
+      if (!visible(el) || el.disabled) return false;
+      const text = (el.textContent || '').trim().toLowerCase();
+      return /^(stop|stop generating|stop response|stop streaming)$/.test(text);
+    });
+  }
+
+  // ── Usage-limit detector (as readAICodeSnapshot) ────────────────────────
+  function usageLimitHit() {
+    let zones = '';
+    try {
+      zones = [...document.querySelectorAll('[role="alert"], [role="status"], [role="dialog"], [class*="banner" i], [class*="toast" i], [class*="notice" i], [class*="modal" i], main')]
+        .filter(visible).slice(0, 8)
+        .map(el => (el.innerText || el.textContent || '')).join('  ');
+    } catch (e) {}
+    const text = (zones + '  ' + ((document.body && document.body.innerText) || '').slice(0, 4000))
+      .toLowerCase().replace(/\s+/g, ' ');
+    const patterns = [
+      /you'?ve reached (?:your|our|the)[^.]{0,40}?limit/,
+      /you'?ve hit (?:your|the)[^.]{0,40}?limit/,
+      /reached (?:your|the) (?:weekly|daily|hourly|free plan|plus|pro)[^.]{0,30}?limit/,
+      /\bweekly limit\b/,
+      /reached (?:the|your)[^.]{0,20}?limit for gpt/,
+      /reached our limit of messages/,
+      /reached the current usage cap/,
+      /you'?ll be able to send messages again/,
+      /message limit reached/,
+      /you'?re out of (?:free )?messages/,
+      /limit resets (?:in|on|at)/
+    ];
+    for (const re of patterns) {
+      const i = text.search(re);
+      if (i >= 0) return text.slice(i, i + 160).trim();
+    }
+    return '';
+  }
+
+  function textOf(el) {
+    const a = (el && el.innerText) || '';
+    const b = (el && el.textContent) || '';
+    return (b.length > a.length ? b : a).replace(/\u00a0/g, ' ').trim();
+  }
+
+  const msg = findLastAssistantMessage();
+  const texts = [];
+  if (msg) {
+    const seen = new Set();
+    const push = (el) => {
+      const t = textOf(el);
+      if (!t || seen.has(t)) return;
+      seen.add(t);
+      texts.push(t);
+    };
+    msg.querySelectorAll('pre').forEach(pre => push(pre.querySelector('code') || pre));
+    msg.querySelectorAll('code').forEach(el => { if (!el.closest('pre')) push(el); });
+  }
+  return {
+    isGenerating: isGenerating(),
+    texts: texts.slice(0, 12),
+    messageText: msg ? textOf(msg).slice(0, 200000) : '',
+    hadAssistantMsg: !!msg,
     usageLimit: usageLimitHit()
   };
 }

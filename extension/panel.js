@@ -40,7 +40,16 @@ let state = {
   fastPasteWait: '10',
   fastStartAfter: '0',
   fastPasteRetries: '3',
-  fastManual: 'off'
+  fastManual: 'off',
+  // 🛡 Safety Gate + Fact check (v3.46.0)
+  gateEnabled: 'on',
+  gateLinkCheck: 'on',
+  gateNewFaq: 'auto',
+  gateSiteDomains: '',
+  factCheck: 'on',
+  factCheckAiId: '',
+  factCheckPromptId: '',
+  factCheckOnError: 'keep'
 };
 
 const BUILTIN_AIS = [
@@ -78,6 +87,26 @@ const DEFAULT_PROMPTS = [
     text: "Act as an Expert Affiliate Marketer, SEO Specialist, CRO Specialist, and HTML Content Editor.\nI will provide the full HTML body code for an Amazon affiliate review article. Your job is to work in two separate stages:\n1. First, conduct a deep-dive audit of the article.\n2. Then, update the full HTML article body code based on that audit.\nImportant: Keep a clear gap between the audit section and the updated HTML section.\n==============================\nPART 1: DEEP-DIVE AUDIT\nPlease carefully review the full HTML content, article title if visible, introduction, headings, product sections, comparison table, buyer guide, FAQ, conclusion, design, formatting, schema if included, ZimWriter blocks if included, and all included Amazon product links.\nConduct a detailed audit covering the following areas:\n1. Product Relevance Check:\n* Based on the article title, introduction, and main buyer intent, check whether every listed product is relevant to the topic.\n* Flag any product that feels irrelevant, mismatched, too broad, or not suitable for the article's target keyword.\n* Explain why the product does not fit.\n* Recommend whether the product should be removed, replaced, moved to another article, or kept.\n* Check whether the product order makes sense based on the article topic and buyer needs.\n2. Fact-Checking & Product Verification:\n* Check the provided Amazon links and verify the current product information when possible.\n* Flag any outdated product specs, discontinued models, unavailable products, or inaccurate claims in the article.\n* Compare the article's product details with the current Amazon listing details, including product name, key features, dimensions, weight limits, age range, materials, safety claims, and included accessories.\n* Do not mention exact prices, star ratings, review counts, discounts, or availability unless they are verified as current.\n* If any information cannot be verified, clearly say so and do not guess.\n* Mention anything that needs to be corrected, updated, softened, or removed.\n3. Content Gap Analysis:\n* Identify crucial buying information or product details missing from the review.\n* Mention buyer questions that the article currently fails to answer.\n* Check for missing comparison points such as size, weight, safety, ease of use, cleaning, durability, warranty, price range, portability, age suitability, and who each product is best for.\n* Suggest any additional sections, FAQs, comparison tables, buyer-guide content, or trust-building details that should be added.\n4. Conversion Rate Optimization:\n* Analyze the structure, persuasion, and affiliate-sales potential of the article.\n* Identify weak paragraphs, unclear product descriptions, boring introductions, weak CTAs, or low-converting sections.\n* Suggest specific CTA improvements to increase Amazon clicks.\n* Check whether the CTA button text, placement, and frequency are strong enough.\n* Recommend where to add urgency, trust signals, pros/cons, comparison points, and buyer-focused language.\n* Flag formatting choices that may reduce clicks or make the article harder to scan.\n5. Buyer Attraction & Product Persuasion:\n* Suggest honest ways to make readers more interested in the products.\n* Explain where the article should better show the problem each product solves.\n* Recommend stronger \"Why You'll Like It\" paragraphs.\n* Suggest \"Who Should Buy This\" and \"Who Should Avoid This\" sections where helpful.\n* Recommend ways to reduce buyer hesitation and make the buying decision easier.\n* Suggest stronger product positioning, such as Best Overall, Best Budget Pick, Best for Travel, Best Premium Pick, Best for Small Spaces, or similar labels when appropriate.\n* Do not suggest fake scarcity, fake discounts, fake reviews, fake testing, fake authority, or unsupported claims.\n6. Technical & On-Page SEO Gap:\n* Identify missing semantic keywords, LSI keywords, and buyer-intent keywords.\n* Evaluate the heading structure, including H2 and H3 usage.\n* Check whether the article matches the search intent suggested by the title and introduction.\n* Suggest improvements for SEO title, meta description, headings, introduction, product section order, FAQ, schema, and internal linking.\n* Do not recommend adding the article title as an <h1> inside the final body HTML.\n* Mention any content freshness issues that could affect rankings.\n7. Design, Authority & Engagement Improvements:\n* Check whether the article looks attractive, professional, and easy to scan.\n* Suggest design improvements that can increase reader trust, time on page, and affiliate clicks.\n* Recommend useful content blocks such as:\n   * Quick Verdict box\n   * Best For badges\n   * Editor's Choice label\n   * Budget Pick label\n   * Premium Pick label\n   * Who Should Buy This section\n   * Who Should Avoid This section\n   * Why You'll Like It section\n   * Pro Tips box\n   * Safety Note box\n   * Before You Buy checklist\n   * Quick Comparison table\n   * Final Recommendation box\n* Add strong authority signals where appropriate, such as:\n   * Clear product selection criteria\n   * Honest pros and cons\n   * Real buyer concerns\n   * Safety cautions\n   * Use-case based recommendations\n   * Updated-year freshness wording\n* Do not invent fake personal testing, fake certifications, fake expert reviews, fake customer data, or unsupported authority signals.\n8. Trust, Compliance & Affiliate Safety:\n* Check whether the article includes enough trust signals, such as honest limitations, real buyer concerns, safety notes, and clear product-use guidance.\n* Flag risky or unsupported claims, especially around safety, medical benefits, baby products, child use, or performance promises.\n* Suggest any needed affiliate disclosure improvements.\n* Identify claims that should be softened, sourced, corrected, or removed.\n9. ZimWriter Code Safety Audit:\n* Check whether the article contains ZimWriter-generated CSS, HTML, product boxes, review blocks, comparison tables, ranking blocks, or special classes.\n* If ZimWriter code exists, identify it and make sure all update recommendations protect it.\n* Do not recommend changes that would break ZimWriter layout, CSS, counters, product cards, tables, review boxes, or responsive design.\nPresent the audit findings in a clear, prioritized list. For every important issue, explain:\n* What is wrong\n* Why it matters for SEO, trust, affiliate conversion, or code safety\n* Exactly how to fix it\n==============================\nPART 2: ARTICLE FIXED HTML BOX\nAfter completing the audit, update the full HTML article body code based on the corrections and recommendations from Part 1.\nImportant HTML update rules:\n1. The final output is for article body HTML only. Do not include an <h1> tag at the beginning of the article. If the original article body contains a starting <h1> title, remove it from the fixed HTML. Use <h2> and <h3> for article sections only. The page title will be handled separately in WordPress, so the body HTML should not repeat the main title as an <h1>.\n2. Do not change, replace, remove, or edit any existing images for products or sections that remain in the article. This includes <img> tags, image src links, image file names, image placement, and image alt text.\n3. If a product is removed from the article, remove the full product section, including its image, CTA button, pros/cons, comparison table row, and all related mentions. Do not leave any orphan product image or broken section.\n4. Only make the specific modifications necessary to implement the audit corrections. Do not unnecessarily rewrite, restructure, or redesign the rest of the HTML code.\n5. If any product is clearly irrelevant, mismatched, unavailable, discontinued, or not suitable based on the article title, introduction, and buyer intent, remove that product from the article.\n6. Special Product-Match Rule:\n* If at least 3 products match the original title, introduction, and search intent, keep the article topic and remove only the clearly irrelevant products.\n* If only 1 or 2 products match the original topic, do not leave the article too short. Instead, adjust the introduction, headings, product order, buyer guide, FAQ, conclusion, and overall angle to fit the products that are available.\n* Build the article around the best common topic for those products.\n* Still remove any product that remains irrelevant after the article angle is adjusted.\n* Do not add new products unless I request replacements.\n7. If you remove any irrelevant product, also update the introduction, headings, product order, comparison table, buyer guide, FAQ, conclusion, schema, and related text as needed so the article stays accurate, natural, and fully aligned with the main topic.\n8. Do not remove a product only because it is slightly different. Remove it only if it clearly does not match the article's main buyer intent or would confuse readers.\n9. Keep all existing Amazon affiliate links unless a product is removed for being irrelevant, unavailable, discontinued, or inaccurate.\n10. Do not change any Amazon affiliate URL unless the related product is removed.\n11. Preserve existing affiliate attributes such as rel=\"nofollow\", rel=\"sponsored\", target=\"_blank\", tracking IDs, and Amazon tag parameters. If an Amazon affiliate link is missing proper affiliate disclosure attributes, flag it in the audit and carefully add safe attributes only when appropriate.\n12. Update inaccurate product specs, outdated claims, unsupported claims, weak CTAs, missing safety notes, SEO gaps, design issues, and CRO issues based on the audit.\n13. Keep the same overall HTML format, styling, button structure, tables, and section layout unless a change is required to fix an issue or improve conversion.\n14. Improve the article's design, authority, and engagement where useful. Add helpful blocks such as Quick Verdict, Best For badges, Why You'll Like It, Who Should Buy This, Who Should Avoid This, Pro Tips, Safety Notes, Before You Buy checklist, comparison tables, and Final Recommendation boxes when they can improve trust, traffic, readability, and affiliate clicks.\n15. Make the blog design more attractive, clean, modern, mobile-friendly, and easy to scan. Use simple HTML and inline CSS only where needed. Do not add complex scripts, external CSS files, or design elements that may break WordPress formatting.\n16. Add buyer-focused persuasion naturally:\n* Explain the problem the product solves.\n* Show who the product is best for.\n* Mention the main benefit clearly.\n* Reduce buyer hesitation.\n* Add trust-building limitations.\n* Help readers compare products quickly.\n* Make the buying decision easier.\n17. Improve CTA text where needed. Use stronger CTA text such as:\n* Check Price on Amazon\n* Check Current Amazon Availability\n* View Latest Deal on Amazon\n* Check Product Details on Amazon\n* See Today's Price on Amazon\n18. Orange Button Rule:\n* All normal Amazon CTA buttons must be orange, bold, rounded, mobile-friendly, and clickable-looking.\n* Use attractive orange button styling for product CTA buttons and comparison table CTA buttons when it can be done safely.\n* Use inline CSS directly inside each CTA <a> tag when needed so the button style works in WordPress.\n* Do not use yellow buttons.\n* Do not force orange inline styling if it would break protected ZimWriter button classes or layouts.\n19. ZimWriter Code Protection Rule: If the article contains ZimWriter-generated HTML, CSS, tables, product boxes, review blocks, or classes, do not break, rewrite, remove, rename, or restyle them.\nProtected ZimWriter classes and structures include, but are not limited to:\n* .btie-style-short\n* .btie-style-reviews\n* .btie-style-box\n* .btie-style-box-image\n* .btie-style-box-button\n* .toc-img\n* .toc-det\n* .toc-tag\n* .toc-pro1\n* .toc-pro2\n* .toc-pro3\n* .toc-but\n* .toc-rev\n* .btie-style-reviews-features\n* Any related ZimWriter table, review, product-card, ranking, or comparison structure\nDo not change ZimWriter CSS, class names, grid layout, media queries, counters, product-box structure, table structure, review structure, or responsive styling unless it is absolutely required to remove a deleted product section.\nThe orange button rule must not damage ZimWriter button classes. If a CTA button is controlled by ZimWriter classes such as .toc-but or .btie-style-box-button, preserve the existing ZimWriter structure and class system. Do not force inline styling that could break the ZimWriter layout.\nIf a product is removed, remove only that product's full related ZimWriter block, including its image, CTA, pros/cons, table row, review block, and related mentions. Do not leave broken numbering, orphan CSS, empty list items, or broken comparison rows.\nIf editing text inside a ZimWriter block, only update the visible text, CTA wording, product facts, and buyer-focused copy. Do not alter the ZimWriter code structure.\nZimWriter protection priority order:\n1. Preserve ZimWriter code and layout.\n2. Preserve existing images for products that remain.\n3. Preserve Amazon affiliate URLs.\n4. Apply SEO, CRO, design, and orange button improvements only when they do not break the ZimWriter code.\n20. Keep persuasion honest. Do not invent fake hands-on testing, fake expert credentials, fake customer reviews, fake discounts, fake scarcity, fake certifications, fake awards, or unsupported product benefits.\n21. If schema or JSON-LD is included, update it to match the final article topic, FAQ, product list, product removals, and changed recommendations. Do not leave outdated schema that conflicts with the visible article.\n22. Improve the article so it becomes more accurate, buyer-focused, SEO-friendly, trustworthy, attractive, and conversion-friendly.\n23. The updated HTML output must be shown in a clear HTML code box named exactly:\nArticle Fixed HTML Box\n24. Inside the Article Fixed HTML Box, provide the complete updated HTML body code in one full html code block. Do not skip sections, summarize the code, or use placeholders like \"same as above.\"\n25. After the Article Fixed HTML Box, do not write anything else. No change summary, no notes, no explanation, and no extra closing text.\nFinal output format:\nFirst show:\nAUDIT REPORT\nThen leave a clear gap and show:\nArticle Fixed HTML Box\nThen put the full updated HTML code inside one clear html code block.\nStop immediately after the HTML code block."
   }
 ];
+
+// 🛡 Safety Gate prompts shipped with the extension (extension/prompts/*.txt).
+// loadState APPENDS them once (flag safetyGatePromptsInstalled_v1) — the
+// user's own prompts and the selected/default prompt are never changed.
+const SAFETY_GATE_FACTCHECK_PROMPT_ID = 'p_sg_factcheck';
+const SAFETY_GATE_PROMPTS = [
+  { id: 'p_sg_editor', type: 'audit', webSearch: true, name: 'Informational Editor (Safety Gate)', file: 'prompts/informational-editor.txt' },
+  { id: SAFETY_GATE_FACTCHECK_PROMPT_ID, type: 'factcheck', webSearch: false, name: 'Fact Check (Safety Gate)', file: 'prompts/fact-check.txt' }
+];
+
+// Read a prompt file bundled with the extension. Returns '' on any failure.
+async function fetchBundledPromptText(path) {
+  try {
+    const resp = await fetch(chrome.runtime.getURL(path), { cache: 'no-store' });
+    if (!resp || !resp.ok) return '';
+    return String((await resp.text()) || '').trim();
+  } catch (e) {
+    return '';
+  }
+}
 
 function allAIProviders() {
   return BUILTIN_AIS.concat((state.customAIs || []).map(normalizeAIConfig));
@@ -133,6 +162,34 @@ function hasAIProvider(id) {
 
 function hasPrompt(id) {
   return state.prompts.some(p => p.id === id);
+}
+
+// ── Prompt kinds (v3.46.0) ──
+// 'audit' and 'edit' prompts do the edit itself. 'factcheck' prompts are only
+// used by the Safety Gate's 2nd AI round, so they never show in the Run tab's
+// Prompt dropdown and can never become the run (default) prompt.
+function normalizePromptType(t) {
+  return (t === 'edit' || t === 'factcheck') ? t : 'audit';
+}
+function isRunPrompt(p) {
+  return !!p && p.type !== 'factcheck';
+}
+function runPrompts() {
+  return state.prompts.filter(isRunPrompt);
+}
+function hasRunPrompt(id) {
+  return state.prompts.some(p => p.id === id && isRunPrompt(p));
+}
+function factCheckPrompts() {
+  return state.prompts.filter(p => p && p.type === 'factcheck');
+}
+function hasFactCheckPrompt(id) {
+  return !!id && factCheckPrompts().some(p => p.id === id);
+}
+// Used when no fact-check prompt is chosen: the seeded one, else the first one.
+function defaultFactCheckPromptId() {
+  if (hasFactCheckPrompt(SAFETY_GATE_FACTCHECK_PROMPT_ID)) return SAFETY_GATE_FACTCHECK_PROMPT_ID;
+  return factCheckPrompts()[0]?.id || '';
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -207,6 +264,9 @@ async function loadState() {
     defaultPromptId: null,
     selectedSiteIndex: 0,
     savedSlugDraft: '',
+    // BUG FIX: saved by saveState() but missing here, so it was always []
+    // after the panel reloaded (same trap as the six keys below).
+    lastRunSlugs: [],
     processedLinks: [],
     archivedAttemptKeys: [],
     delayBetween: 10,
@@ -255,7 +315,17 @@ async function loadState() {
     fastPasteWait: '10',
     fastStartAfter: '0',
     fastPasteRetries: '3',
-    fastManual: 'off'
+    fastManual: 'off',
+    // 🛡 Safety Gate + Fact check (v3.46.0) — every key MUST be listed here,
+    // or it silently resets to its default on every reload.
+    gateEnabled: 'on',
+    gateLinkCheck: 'on',
+    gateNewFaq: 'auto',
+    gateSiteDomains: '',
+    factCheck: 'on',
+    factCheckAiId: '',
+    factCheckPromptId: '',
+    factCheckOnError: 'keep'
   });
 
   state.wpSites = (data.wpSites || []).map(site => ({
@@ -275,7 +345,8 @@ async function loadState() {
   if (state.wpSites.length === 0) state.wpDefaultIndex = -1;
   state.customAIs = (data.customAIs || []).map(normalizeAIConfig);
   state.prompts = data.prompts || JSON.parse(JSON.stringify(DEFAULT_PROMPTS));
-  state.prompts = (state.prompts || []).map(p => ({ ...p, type: (p.type === 'edit' ? 'edit' : 'audit') }));
+  // v3.46.0: keep the new 'factcheck' type; a missing webSearch flag = false.
+  state.prompts = (state.prompts || []).map(p => ({ ...p, type: normalizePromptType(p.type), webSearch: p.webSearch === true }));
   // One-time: add a ready-made "Preserve Everything" prompt so the browser AI
   // keeps all products/tables/images (just pick it from the prompt dropdown).
   // Existing prompts are untouched; if you delete it, it will not come back.
@@ -289,10 +360,31 @@ async function loadState() {
       await chrome.storage.local.set({ preservePromptInstalled_v1: true });
     }
   }
+  // One-time (v3.46.0): APPEND the two Safety Gate prompts shipped in
+  // extension/prompts/. Existing prompts and the selected/default prompt are
+  // untouched; if you delete one, it will not come back. If a file cannot be
+  // read, the flag is NOT set, so the next panel load tries again.
+  {
+    const _sgp = await chrome.storage.local.get({ safetyGatePromptsInstalled_v1: false });
+    if (!_sgp.safetyGatePromptsInstalled_v1) {
+      let allPresent = true;
+      let added = false;
+      for (const sp of SAFETY_GATE_PROMPTS) {
+        if (state.prompts.some(p => p && p.id === sp.id)) continue;
+        const text = await fetchBundledPromptText(sp.file);
+        if (!text) { allPresent = false; continue; }
+        state.prompts.push({ id: sp.id, type: sp.type, webSearch: sp.webSearch, name: sp.name, text });
+        added = true;
+      }
+      if (added) await chrome.storage.local.set({ prompts: state.prompts });
+      if (allPresent) await chrome.storage.local.set({ safetyGatePromptsInstalled_v1: true });
+    }
+  }
   state.defaultAIId = hasAIProvider(data.defaultAIId) ? data.defaultAIId : (hasAIProvider(data.selectedAI) ? data.selectedAI : 'grok');
   state.selectedAI = hasAIProvider(data.selectedAI) ? data.selectedAI : state.defaultAIId;
-  state.defaultPromptId = hasPrompt(data.defaultPromptId) ? data.defaultPromptId : (hasPrompt(data.selectedPromptId) ? data.selectedPromptId : (state.prompts[0]?.id || null));
-  state.selectedPromptId = hasPrompt(data.selectedPromptId) ? data.selectedPromptId : state.defaultPromptId;
+  // v3.46.0: the run prompt can never be a 'factcheck' prompt.
+  state.defaultPromptId = hasRunPrompt(data.defaultPromptId) ? data.defaultPromptId : (hasRunPrompt(data.selectedPromptId) ? data.selectedPromptId : (runPrompts()[0]?.id || null));
+  state.selectedPromptId = hasRunPrompt(data.selectedPromptId) ? data.selectedPromptId : state.defaultPromptId;
   state.selectedSiteIndex = data.wpDefaultIndex;
   state.savedSlugDraft = data.savedSlugDraft || '';
   state.lastRunSlugs = Array.isArray(data.lastRunSlugs) ? data.lastRunSlugs : [];
@@ -346,6 +438,16 @@ async function loadState() {
 
   state.fastPasteRetries = String(sanitizePasteRetries(data.fastPasteRetries ?? 3));
   state.fastManual = (data.fastManual === 'on') ? 'on' : 'off';
+  // 🛡 Safety Gate + Fact check (v3.46.0) — On by default.
+  state.gateEnabled = (data.gateEnabled === 'off') ? 'off' : 'on';
+  state.gateLinkCheck = (data.gateLinkCheck === 'off') ? 'off' : 'on';
+  state.gateNewFaq = (data.gateNewFaq === 'no') ? 'no' : 'auto';
+  state.gateSiteDomains = String(data.gateSiteDomains || '');
+  state.factCheck = (data.factCheck === 'off') ? 'off' : 'on';
+  state.factCheckAiId = hasAIProvider(data.factCheckAiId) ? data.factCheckAiId : '';
+  // Empty or deleted → the seeded "Fact Check (Safety Gate)" prompt (or the first fact-check prompt).
+  state.factCheckPromptId = hasFactCheckPrompt(data.factCheckPromptId) ? data.factCheckPromptId : defaultFactCheckPromptId();
+  state.factCheckOnError = (data.factCheckOnError === 'save') ? 'save' : 'keep';
 
   // Apply to UI
   document.getElementById('aiTimeout').value = state.aiTimeout;
@@ -427,6 +529,21 @@ async function loadState() {
   if (mtEl) mtEl.value = state.apiMaxTokens || '16000';
   const asEl = document.getElementById('autoSplit');
   if (asEl) asEl.value = state.autoSplit || 'off';
+  // 🛡 Safety Gate (v3.46.0). factCheckAiId / factCheckPromptId are filled by
+  // their dropdown renderers (renderAll), because their options change.
+  const geEl = document.getElementById('gateEnabled');
+  if (geEl) geEl.value = state.gateEnabled || 'on';
+  const glcEl = document.getElementById('gateLinkCheck');
+  if (glcEl) glcEl.value = state.gateLinkCheck || 'on';
+  const gnfEl = document.getElementById('gateNewFaq');
+  if (gnfEl) gnfEl.value = state.gateNewFaq || 'auto';
+  const gsdEl = document.getElementById('gateSiteDomains');
+  if (gsdEl) gsdEl.value = state.gateSiteDomains || '';
+  const fckEl = document.getElementById('factCheck');
+  if (fckEl) fckEl.value = state.factCheck || 'on';
+  const fceEl = document.getElementById('factCheckOnError');
+  if (fceEl) fceEl.value = state.factCheckOnError || 'keep';
+  applyGateUi();
   updateWpCredentialUi();
 
   // --- One-time install of the audit prompt as the active system prompt. ---
@@ -529,7 +646,15 @@ async function saveState() {
 
 
     fastPasteRetries: state.fastPasteRetries,
-    fastManual: state.fastManual
+    fastManual: state.fastManual,
+    gateEnabled: state.gateEnabled,
+    gateLinkCheck: state.gateLinkCheck,
+    gateNewFaq: state.gateNewFaq,
+    gateSiteDomains: state.gateSiteDomains,
+    factCheck: state.factCheck,
+    factCheckAiId: state.factCheckAiId,
+    factCheckPromptId: state.factCheckPromptId,
+    factCheckOnError: state.factCheckOnError
   });
 }
 
@@ -546,6 +671,8 @@ function renderAll() {
   renderPromptList();
   renderProcessedLinks();
   renderFallbackDropdown();
+  renderFactCheckAiDropdown();
+  renderFactCheckPromptDropdown();
 }
 
 // Run-tab Configuration: REAL dropdowns — pick the WordPress site, AI service
@@ -596,10 +723,12 @@ function renderAIDropdown() {
 function renderPromptDropdown() {
   const el = document.getElementById('runPromptSelect');
   if (!el) return;
-  if (!state.prompts.length) { el.innerHTML = '<option value="">— Add a prompt in Settings —</option>'; state.selectedPromptId = null; return; }
-  if (!hasPrompt(state.defaultPromptId)) state.defaultPromptId = state.prompts[0].id;
-  el.innerHTML = state.prompts.map(p =>
-    '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name + '  [' + (p.type === 'edit' ? 'EDIT ONLY' : 'AUDIT + FIX') + ']') + '</option>').join('');
+  // v3.46.0: fact-check prompts are used only by the Safety Gate — never listed here.
+  const list = runPrompts();
+  if (!list.length) { el.innerHTML = '<option value="">— Add a prompt in Settings —</option>'; state.selectedPromptId = null; return; }
+  if (!hasRunPrompt(state.defaultPromptId)) state.defaultPromptId = list[0].id;
+  el.innerHTML = list.map(p =>
+    '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name + '  [' + (p.type === 'edit' ? 'EDIT ONLY' : 'AUDIT + FIX') + (p.webSearch ? ' · WEB SEARCH' : '') + ']') + '</option>').join('');
   el.value = state.defaultPromptId;
   state.selectedPromptId = state.defaultPromptId;
   el.onchange = () => {
@@ -872,13 +1001,37 @@ function renderPromptList() {
   }
   state.prompts.forEach((p, i) => {
     const row = document.createElement('div');
-    row.className = 'prompt-item' + (p.id === state.defaultPromptId ? ' active' : '');
+    const isFact = p.type === 'factcheck';
+    row.className = 'prompt-item' + ((!isFact && p.id === state.defaultPromptId) ? ' active' : '');
+    const typeColor = isFact ? '#ffb340' : (p.type === 'edit' ? '#7aa2ff' : '#5fcc6a');
+    const typeLabel = isFact ? 'FACT CHECK' : (p.type === 'edit' ? 'EDIT ONLY' : 'AUDIT + FIX');
     row.innerHTML =
       '<div class="prompt-info">' +
-        '<div class="prompt-name">' + escapeHtml(p.name) + ' <span style="font-size:10px;font-weight:700;color:' + (p.type === 'edit' ? '#7aa2ff' : '#5fcc6a') + ';">[' + (p.type === 'edit' ? 'EDIT ONLY' : 'AUDIT + FIX') + ']</span></div>' +
+        '<div class="prompt-name">' + escapeHtml(p.name) + ' <span style="font-size:10px;font-weight:700;color:' + typeColor + ';">[' + typeLabel + ']</span>' +
+          (p.webSearch ? ' <span style="font-size:10px;font-weight:700;color:#7ee787;" title="The AI may use web search with this prompt">[🌐 WEB SEARCH]</span>' : '') + '</div>' +
         '<div class="prompt-preview">' + escapeHtml(p.text.slice(0, 120)) + (p.text.length > 120 ? '…' : '') + '</div>' +
       '</div>';
-    if (p.id === state.defaultPromptId) {
+    if (isFact) {
+      // Fact-check prompts are picked for the Safety Gate, never as the run prompt.
+      if (p.id === state.factCheckPromptId) {
+        const badge = document.createElement('span');
+        badge.className = 'default-badge';
+        badge.textContent = 'FACT CHECK';
+        badge.title = 'Used by the Safety Gate fact check';
+        row.appendChild(badge);
+      } else {
+        const useFact = document.createElement('button');
+        useFact.className = 'btn-mini';
+        useFact.textContent = 'Use for Fact Check';
+        useFact.onclick = () => {
+          state.factCheckPromptId = p.id;
+          saveState();
+          renderAll();
+          if (state.batchActive) pushLiveSettings();
+        };
+        row.appendChild(useFact);
+      }
+    } else if (p.id === state.defaultPromptId) {
       const badge = document.createElement('span');
       badge.className = 'default-badge';
       badge.textContent = 'DEFAULT';
@@ -901,7 +1054,8 @@ function renderPromptList() {
     edit.onclick = () => {
       document.getElementById('promptName').value = p.name;
       document.getElementById('promptText').value = p.text;
-      { const ptSel = document.getElementById('promptType'); if (ptSel) ptSel.value = (p.type === 'edit' ? 'edit' : 'audit'); }
+      { const ptSel = document.getElementById('promptType'); if (ptSel) ptSel.value = normalizePromptType(p.type); }
+      { const wsCb = document.getElementById('promptWebSearch'); if (wsCb) wsCb.checked = p.webSearch === true; }
       document.getElementById('promptAdd').dataset.editing = p.id;
       document.getElementById('promptAdd').textContent = '💾 Save Changes';
       document.getElementById('promptName').focus();
@@ -913,8 +1067,9 @@ function renderPromptList() {
     del.onclick = () => {
       if (!confirm('Delete "' + p.name + '"?')) return;
       state.prompts.splice(i, 1);
-      if (state.selectedPromptId === p.id) state.selectedPromptId = state.prompts[0]?.id;
-      if (state.defaultPromptId === p.id) state.defaultPromptId = state.prompts[0]?.id || null;
+      if (state.selectedPromptId === p.id) state.selectedPromptId = runPrompts()[0]?.id;
+      if (state.defaultPromptId === p.id) state.defaultPromptId = runPrompts()[0]?.id || null;
+      if (state.factCheckPromptId === p.id) state.factCheckPromptId = defaultFactCheckPromptId();
       saveState(); renderAll();
     };
     row.appendChild(edit);
@@ -940,6 +1095,7 @@ function resetPromptForm(message) {
   document.getElementById('promptName').value = '';
   document.getElementById('promptText').value = '';
   { const ptSel = document.getElementById('promptType'); if (ptSel) ptSel.value = 'audit'; }
+  { const wsCb = document.getElementById('promptWebSearch'); if (wsCb) wsCb.checked = false; }
   delete addButton.dataset.editing;
   addButton.textContent = '+ Add Prompt';
   if (message) showMsg(message, 'ok');
@@ -1275,15 +1431,24 @@ document.getElementById('promptAdd').onclick = () => {
   const text = document.getElementById('promptText').value.trim();
   if (!name || !text) { return showMsg('Enter both name and text.', 'err'); }
   const editing = document.getElementById('promptAdd').dataset.editing;
+  const type = normalizePromptType((document.getElementById('promptType') || {}).value);
+  const webSearch = !!(document.getElementById('promptWebSearch') || {}).checked;
   if (editing) {
     const p = state.prompts.find(x => x.id === editing);
-    if (p) { p.name = name; p.text = text; p.type = ((document.getElementById('promptType') || {}).value === 'edit' ? 'edit' : 'audit'); }
+    if (p) { p.name = name; p.text = text; p.type = type; p.webSearch = webSearch; }
   } else {
-    const prompt = { id: 'p_' + Date.now(), name, text, type: ((document.getElementById('promptType') || {}).value === 'edit' ? 'edit' : 'audit') };
+    const prompt = { id: 'p_' + Date.now(), name, text, type, webSearch };
     state.prompts.push(prompt);
-    if (!state.defaultPromptId) state.defaultPromptId = prompt.id;
-    if (!state.selectedPromptId) state.selectedPromptId = prompt.id;
+    if (type === 'factcheck') {
+      if (!hasFactCheckPrompt(state.factCheckPromptId)) state.factCheckPromptId = prompt.id;
+    } else {
+      if (!hasRunPrompt(state.defaultPromptId)) state.defaultPromptId = prompt.id;
+      if (!hasRunPrompt(state.selectedPromptId)) state.selectedPromptId = prompt.id;
+    }
   }
+  // A prompt edited into / out of the 'factcheck' type must not stay the run
+  // prompt / the fact-check prompt (renderPromptDropdown fixes the run prompt).
+  if (!hasFactCheckPrompt(state.factCheckPromptId)) state.factCheckPromptId = defaultFactCheckPromptId();
   resetPromptForm();
   saveState(); renderAll();
   showMsg('Prompt saved.', 'ok');
@@ -1431,6 +1596,15 @@ function syncStateFromUi() {
   state.fastPasteRetries = String(sanitizePasteRetries(pick('fastPasteRetries', state.fastPasteRetries)));
   { const _fm = document.getElementById('fastManual'); if (_fm) state.fastManual = _fm.checked ? 'on' : 'off'; }
   state.fallbackAIId = pick('fallbackAI', state.fallbackAIId);
+  // 🛡 Safety Gate + Fact check (v3.46.0)
+  state.gateEnabled = (pick('gateEnabled', state.gateEnabled) === 'off') ? 'off' : 'on';
+  state.gateLinkCheck = (pick('gateLinkCheck', state.gateLinkCheck) === 'off') ? 'off' : 'on';
+  state.gateNewFaq = (pick('gateNewFaq', state.gateNewFaq) === 'no') ? 'no' : 'auto';
+  state.gateSiteDomains = parseGateSiteDomains(pick('gateSiteDomains', state.gateSiteDomains)).join(', ');
+  state.factCheck = (pick('factCheck', state.factCheck) === 'off') ? 'off' : 'on';
+  state.factCheckAiId = pick('factCheckAiId', state.factCheckAiId) || '';
+  state.factCheckPromptId = pick('factCheckPromptId', state.factCheckPromptId) || '';
+  state.factCheckOnError = (pick('factCheckOnError', state.factCheckOnError) === 'save') ? 'save' : 'keep';
   const ta = document.getElementById('slugTextarea');
   if (ta) state.savedSlugDraft = ta.value;
 }
@@ -1551,7 +1725,7 @@ document.getElementById('startBtn').onclick = async () => {
   }
 
   const aiId = state.defaultAIId;
-  const prompt = state.prompts.find(p => p.id === state.defaultPromptId);
+  const prompt = state.prompts.find(p => p.id === state.defaultPromptId && isRunPrompt(p));
   if (!prompt) return showMsg('Set a default prompt in Settings.', 'err');
 
   // Resolve AI
@@ -1604,6 +1778,7 @@ document.getElementById('startBtn').onclick = async () => {
     'AI timeout: ' + aiTimeoutDisplay + '\n' +
     (siteMode(site) === 'rest' ? '' : 'Wait after UPDATE: ' + updateWaitSec + 's\n') +
     'Completeness check: ' + (state.completeness || 'balanced') + '\n' +
+    safetyGateSummary() + '\n' +
     'Max retries per post: ' + retryCount + '\n' +
     'Posts at the same time: ' + parseInt(state.parallelCount || '1', 10) + (parseInt(state.parallelCount || '1', 10) > 1 ? ' ⚡' : ' (one by one)') + '\n' +
     'If a post fails: ' + (state.retryMode === 'inline' ? 'retry immediately' : state.retryMode === 'off' ? 'no automatic retry' : 'retry at the END of the batch') + '\n'
@@ -1646,6 +1821,7 @@ document.getElementById('startBtn').onclick = async () => {
     ...limitFlagsFromMode(),
     failStopCount: parseInt(state.failStopCount ?? '5', 10),
     failRetryAfter: parseInt(state.failRetryAfter ?? '60', 10),
+    ...safetyGateJobFields(prompt),
     parallel: parseInt(state.parallelCount || '1', 10)
   };
 
@@ -1852,7 +2028,7 @@ function updateProgressUI(s) {
   document.getElementById('startBtn').disabled = s.running || !gateOk;   // Fix 6
   document.getElementById('pauseBtn').disabled = !running;
   // Stop is also the way to call off a scheduled (not yet started) run.
-  document.getElementById(stopBtn).disabled = !(s.running || state._pendingStart);
+  document.getElementById('stopBtn').disabled = !(s.running || state._pendingStart);
   document.getElementById('pauseBtn').style.display = s.paused ? 'none' : '';
   document.getElementById('resumeBtn').style.display = s.paused ? '' : 'none';
   // NEVER gated by the save flags. Resume continues a run that is already
@@ -2039,7 +2215,10 @@ function archiveProcessedAttempts(attempts) {
       aiSessionUrl: attempt.aiSessionUrl || '',
       aiName: attempt.aiName || '',
       time: attempt.time || '',
-      isoTime: attempt.isoTime || new Date().toISOString()
+      isoTime: attempt.isoTime || new Date().toISOString(),
+      // 🛡 v3.46.0: why the Safety Gate / Fact check blocked (or noted) this post.
+      gate: compactGateInfo(attempt.gate),
+      factCheck: compactFactCheckInfo(attempt.factCheck)
     });
     // STRICT rule: a slug leaves the Posts-to-update box ONLY when its post
     // reaches a FINAL state — Successful, Audit Issues, or Failed — because it
@@ -2179,6 +2358,136 @@ function parseAuditInfo(message) {
   };
 }
 
+// ── 🛡 Safety Gate / Fact check results (v3.46.0) ──
+// Failure messages start with one of these prefixes (EXT-SPEC 2.7), possibly
+// after a wrapper such as "Fast submit failed — ". Parsing the TEXT keeps old
+// rows and CSV exports working even without the structured gate fields.
+function parseGateInfo(message) {
+  const msg = String(message || '');
+  const m = msg.match(/SAFETY GATE BLOCKED|FACT CHECK BLOCKED|FACT CHECK ERROR/);
+  if (!m) return { isGate: false, kind: '', codes: [], text: '' };
+  const text = msg.slice(m.index);
+  const kind = m[0] === 'SAFETY GATE BLOCKED' ? 'gate' : (m[0] === 'FACT CHECK BLOCKED' ? 'factcheck' : 'factcheck-error');
+  let codes = [];
+  if (kind === 'gate') {
+    // "SAFETY GATE BLOCKED: IMG_COUNT, TABLE_LOSS — <messages>. The post was NOT changed."
+    // (With no messages the codes are followed directly by ". The post was …".)
+    const head = text.replace(/^SAFETY GATE BLOCKED:?\s*/, '').split(/\s[—–-]\s|\.(?:\s|$)/)[0];
+    codes = head.split(/[,;]\s*/).map(c => c.trim()).filter(c => /^[A-Z][A-Z0-9_]+(\(\d+\))?$/.test(c));
+  }
+  return { isGate: true, kind, codes, text };
+}
+
+// Small, safe copies of attempt.gate / attempt.factCheck for processedLinks
+// (persisted, up to 2000 rows) — long lists and texts are capped.
+function _capStrList(list, maxItems, maxLen) {
+  return (Array.isArray(list) ? list : []).slice(0, maxItems).map(x => {
+    const t = (x && typeof x === 'object') ? (x.message || x.code || JSON.stringify(x)) : x;
+    return String(t == null ? '' : t).slice(0, maxLen);
+  });
+}
+function compactGateInfo(g) {
+  if (!g || typeof g !== 'object') return null;
+  return {
+    codes: _capStrList(g.codes, 20, 60),
+    messages: _capStrList(g.messages, 10, 300),
+    warnings: _capStrList(g.warnings, 10, 300)
+  };
+}
+function compactFactCheckInfo(f) {
+  if (!f || typeof f !== 'object') return null;
+  const issues = (Array.isArray(f.issues) ? f.issues : []).slice(0, 20).map(i => ({
+    severity: String((i && i.severity) || '').slice(0, 10),
+    category: String((i && i.category) || '').slice(0, 60),
+    quote: String((i && i.quote) || '').slice(0, 300),
+    problem: String((i && i.problem) || '').slice(0, 400),
+    fix: String((i && i.fix) || '').slice(0, 400)
+  }));
+  return {
+    verdict: String(f.verdict || '').slice(0, 20),
+    issues,
+    dropped: Array.isArray(f.dropped) ? f.dropped.length : (Number(f.dropped) || 0),
+    aiSessionUrl: String(f.aiSessionUrl || ''),
+    // Set by background when the fact-check round itself broke (verdict 'error').
+    error: String(f.error || '').slice(0, 300),
+    fixRound: f.fixRound === true
+  };
+}
+
+// Codes to show: the structured ones first, else the ones in the message.
+function gateCodesOf(item, info) {
+  const g = item && item.gate;
+  if (g && Array.isArray(g.codes) && g.codes.length) return g.codes;
+  return (info && info.codes) || [];
+}
+
+// Badges for a Failed row, e.g. "🛡 Gate: IMG_COUNT" / "🔎 Fact check: 2 issues".
+function gateBadgesHtml(item) {
+  const info = parseGateInfo(item && item.message);
+  const f = item && item.factCheck;
+  let html = '';
+  const codes = gateCodesOf(item, info);
+  if (info.kind === 'gate' || (!info.isGate && codes.length)) {
+    const shown = codes.slice(0, 3).join(', ');
+    html += '<span class="pi-badge gate" title="' + escapeHtml(codes.join(', ') || 'Safety Gate') + '">🛡 Gate' +
+      (shown ? ': ' + escapeHtml(shown) + (codes.length > 3 ? ' +' + (codes.length - 3) : '') : '') + '</span>';
+  }
+  if (info.kind === 'factcheck') {
+    const n = (f && Array.isArray(f.issues)) ? f.issues.length : 0;
+    html += '<span class="pi-badge fact">🔎 Fact check' + (n ? ': ' + n + ' issue' + (n === 1 ? '' : 's') : '') + '</span>';
+  } else if (info.kind === 'factcheck-error') {
+    html += '<span class="pi-badge fact">🔎 Fact check error</span>';
+  }
+  return html;
+}
+
+// Expanded-row details: gate codes/messages/warnings and fact-check issues.
+function renderGateDetails(item) {
+  const g = item && item.gate;
+  const f = item && item.factCheck;
+  let html = '';
+  if (g && ((g.messages || []).length || (g.warnings || []).length || (g.codes || []).length)) {
+    html += '<div style="margin-top:6px;"><b>🛡 Safety Gate</b>' +
+      ((g.codes || []).length ? ' — ' + escapeHtml(g.codes.join(', ')) : '') + '</div>';
+    (g.messages || []).forEach(m => { html += '<div style="color:#ff8a8a;">• ' + escapeHtml(m) + '</div>'; });
+    (g.warnings || []).forEach(w => { html += '<div style="color:#ffc46b;">• (warning) ' + escapeHtml(w) + '</div>'; });
+  }
+  if (f && (f.verdict || (f.issues || []).length)) {
+    html += '<div style="margin-top:6px;"><b>🔎 Fact check</b>' + (f.verdict ? ' — verdict: ' + escapeHtml(f.verdict) : '') +
+      (f.dropped ? ' (' + f.dropped + ' issue' + (f.dropped === 1 ? '' : 's') + ' ignored: quote not found in the article)' : '') + '</div>';
+    if (f.error) html += '<div style="color:#ffc46b;">• The fact check itself failed: ' + escapeHtml(f.error) + '</div>';
+    (f.issues || []).forEach(i => {
+      const sev = String(i.severity || '').toLowerCase();
+      html += '<div style="color:' + (sev === 'high' ? '#ff8a8a' : '#ffc46b') + ';">• [' + escapeHtml(sev || '?') + '] ' +
+        escapeHtml(i.problem || '') + (i.fix ? ' — Fix: ' + escapeHtml(i.fix) : '') +
+        (i.quote ? ' — “' + escapeHtml(i.quote) + '”' : '') + '</div>';
+    });
+  }
+  if (!html) return '';
+  return '<div class="processed-message" style="margin-top:6px;">' + html + '</div>' +
+    (f && f.aiSessionUrl ? renderProcessedLink('Fact check chat', f.aiSessionUrl) : '');
+}
+
+// Text for the CSV "Gate reasons" column.
+function gateReasonsText(item) {
+  const info = parseGateInfo(item && item.message);
+  const g = item && item.gate;
+  const f = item && item.factCheck;
+  const parts = [];
+  const codes = gateCodesOf(item, info);
+  if (codes.length || (g && (g.messages || []).length)) {
+    parts.push('Safety Gate: ' + codes.join(', ') + (g && (g.messages || []).length ? ' — ' + g.messages.join('; ') : ''));
+  }
+  if (f && (f.issues || []).length) {
+    parts.push((item.result === 'updated' ? 'Fact check notes' : 'Fact check') + (f.verdict ? ' (' + f.verdict + ')' : '') + ': ' +
+      f.issues.map(i => '[' + (i.severity || '?') + '] ' + (i.problem || '') + (i.quote ? ' "' + i.quote + '"' : '')).join('; '));
+  } else if (f && f.error) {
+    parts.push('Fact check error: ' + f.error);
+  }
+  if (!parts.length && info.isGate) parts.push(info.text);
+  return parts.join(' | ');
+}
+
 // Sort priority: missing FAQ+Conclusion → missing FAQ → missing Conclusion →
 // most audit issues → fewer audit issues.
 function auditSortRank(a) {
@@ -2202,6 +2511,8 @@ function renderResultItem(item, index, opts) {
     if (audit.missingConcl) badges += '<span class="pi-badge concl">Conclusion missing</span>';
     badges += '<span class="pi-badge count">' + audit.count + ' issue' + (audit.count === 1 ? '' : 's') + '</span>';
   }
+  // 🛡 v3.46.0: why the Safety Gate / Fact check blocked a Failed post.
+  if (opts.gateBadges && result === 'failed') badges += gateBadgesHtml(item);
   const check = opts.checkbox
     ? '<input type="checkbox" class="audit-mark" data-key="' + escapeHtml(key) + '"' + (_auditSelected.has(key) ? ' checked' : '') + ' title="Mark this post for the bulk AI re-run">'
     : '';
@@ -2240,6 +2551,7 @@ function renderResultItem(item, index, opts) {
       renderProcessedLink('Edit', item.editorUrl) +
       renderAiSessionLink(item.aiSessionUrl, item.aiProviderUrl, item.message) +
       (item.message ? '<div class="processed-message">' + renderAuditMessage(item.message) + '</div>' : '') +
+      renderGateDetails(item) +
     '</div>' +
   '</div>';
 }
@@ -2328,7 +2640,7 @@ function renderFailedBox() {
   const entries = latestByStatus('failed');
   setCountChip('failedCount', entries.length);
   el.innerHTML = entries.length
-    ? entries.map(({ item, index }, i) => renderResultItem(item, index, { pos: i + 1 })).join('')
+    ? entries.map(({ item, index }, i) => renderResultItem(item, index, { pos: i + 1, gateBadges: true })).join('')
     : '<div class="empty">No failed posts.</div>';
   wireItemActions(el);
 }
@@ -2455,6 +2767,12 @@ function renderAuditMessage(message) {
   if (idxIssue >= 0) {
     return escapeHtml(msg.slice(0, idxIssue)) +
       '<span style="color:#ff5566;font-weight:700;">' + escapeHtml(msg.slice(idxIssue)) + '</span>';
+  }
+  // 🛡 v3.46.0: Safety Gate / Fact check failures are RED from the prefix on.
+  const gateHit = msg.match(/SAFETY GATE BLOCKED|FACT CHECK BLOCKED|FACT CHECK ERROR/);
+  if (gateHit) {
+    return escapeHtml(msg.slice(0, gateHit.index)) +
+      '<span style="color:#ff5566;font-weight:700;">' + escapeHtml(msg.slice(gateHit.index)) + '</span>';
   }
   const idxOk = msg.indexOf('audit OK');
   if (idxOk >= 0) {
@@ -2651,7 +2969,8 @@ function downloadProcessedExcel() {
     'AI Provider',
     'AI Session Link',
     'Message',
-    'AI Provider Start Link'
+    'AI Provider Start Link',
+    'Gate reasons'
   ];
   const rows = state.processedLinks.map(item =>
     [
@@ -2665,7 +2984,8 @@ function downloadProcessedExcel() {
       item.aiName,
       recoverableAiSessionHref(item.aiSessionUrl, item.aiProviderUrl),
       item.message,
-      item.aiProviderUrl
+      item.aiProviderUrl,
+      gateReasonsText(item)
     ].map(csvCell).join(',')
   );
   // Excel opens CSV reliably. The UTF-8 BOM keeps non-ASCII text readable.
@@ -3315,7 +3635,8 @@ function downloadAuditIssuesExcel() {
     'AI Provider',
     'AI Session Link',
     'Message',
-    'AI Provider Start Link'
+    'AI Provider Start Link',
+    'Gate reasons'
   ];
   const rows = entries.map(({ item }) =>
     [
@@ -3329,7 +3650,8 @@ function downloadAuditIssuesExcel() {
       item.aiName,
       recoverableAiSessionHref(item.aiSessionUrl, item.aiProviderUrl),
       item.message,
-      item.aiProviderUrl
+      item.aiProviderUrl,
+      gateReasonsText(item)
     ].map(csvCell).join(',')
   );
   // BUG FIX: this used a raw invisible BOM character in the source (easily
@@ -3452,6 +3774,12 @@ document.getElementById('importFile').onchange = (e) => {
       backup.data.auditPromptInstalled_v1 = true;
       backup.data.bigArticleDefaults_v1 = true;
       backup.data.preservePromptInstalled_v1 = true;
+      // BUG FIX: without this flag the promptsV8 installer REPLACED all the
+      // restored prompts with the defaults on the reload below.
+      backup.data.promptsV8_installed = true;
+      // safetyGatePromptsInstalled_v1 is kept as it is in the backup: that
+      // installer only APPENDS the two Safety Gate prompts when they are
+      // missing (older backups), so it never removes anything.
       await chrome.storage.local.set(backup.data);
       document.getElementById('backupMsg').innerHTML = '<div class="status-line success">✅ Restored! Reloading...</div>';
       setTimeout(() => location.reload(), 1200);
@@ -3469,7 +3797,8 @@ const SETTINGS_DEFAULTS = {
   settleTime: 10, pasteWait: 'custom', pasteWaitCustom: 30, extraPrompts: '0', retryMode: 'end',
   onMissing: 'skip', maxRetries: '2', backgroundMode: 'off', completeness: 'balanced',
   autoSplit: 'off', fallbackAIId: '',
-  auditRetryEnabled: 'off', auditRetryCount: '1', auditRetryTiming: 'end', htmlRecoveryAudit: 'off', htmlRecoveryFailed: 'off', htmlRecoveryAnyCode: 'off', autoSessionZip: 'on', limitGuard: 'off', modelLimitGuard: 'on', modelLimitRetryHours: '0', limitResumeMode: 'exact', limitMode: 'smart', limitFallbackHours: '0', geminiFlashGuard: 'on', failStopCount: '5', failRetryAfter: '60', faqConclAuto: 'off', parallelCount: '1', fastRecoverAfter: '10', fastAnyCode: 'off', fastChunkSize: '50', fastPasteWait: '10', fastPasteRetries: '3', fastStartAfter: '0', fastManual: 'off'
+  auditRetryEnabled: 'off', auditRetryCount: '1', auditRetryTiming: 'end', htmlRecoveryAudit: 'off', htmlRecoveryFailed: 'off', htmlRecoveryAnyCode: 'off', autoSessionZip: 'on', limitGuard: 'off', modelLimitGuard: 'on', modelLimitRetryHours: '0', limitResumeMode: 'exact', limitMode: 'smart', limitFallbackHours: '0', geminiFlashGuard: 'on', failStopCount: '5', failRetryAfter: '60', faqConclAuto: 'off', parallelCount: '1', fastRecoverAfter: '10', fastAnyCode: 'off', fastChunkSize: '50', fastPasteWait: '10', fastPasteRetries: '3', fastStartAfter: '0', fastManual: 'off',
+  gateEnabled: 'on', gateLinkCheck: 'on', gateNewFaq: 'auto', gateSiteDomains: '', factCheck: 'on', factCheckAiId: '', factCheckPromptId: '', factCheckOnError: 'keep'
 };
 const _resetBtn = document.getElementById('resetSettingsBtn');
 if (_resetBtn) _resetBtn.onclick = () => {
@@ -3545,7 +3874,7 @@ function resolveRunConfig() {
   const site = state.wpSites[state.wpDefaultIndex];
   if (!site) return { ok: false, error: 'no default WordPress site' };
   if (siteMode(site) === 'rest' && !siteHasRestCredentials(site)) return { ok: false, error: 'REST credentials missing' };
-  const prompt = state.prompts.find(p => p.id === state.defaultPromptId);
+  const prompt = state.prompts.find(p => p.id === state.defaultPromptId && isRunPrompt(p));
   if (!prompt) return { ok: false, error: 'no default prompt' };
   let aiUrl, aiName, aiKind, aiConfig;
   const builtin = BUILTIN_AIS.find(a => a.id === state.defaultAIId);
@@ -3597,6 +3926,7 @@ function resolveRunConfig() {
     ...limitFlagsFromMode(),
     failStopCount: parseInt(state.failStopCount ?? '5', 10),
     failRetryAfter: parseInt(state.failRetryAfter ?? '60', 10),
+    ...safetyGateJobFields(prompt),
     // Carried so a live edit reaches a running Fast Submit; ignored by Start Batch.
     fastPasteWait: sanitizePasteWait(state.fastPasteWait),
     fastPasteRetries: sanitizePasteRetries(state.fastPasteRetries),
@@ -3810,6 +4140,111 @@ if (_failStopSel) _failStopSel.onchange = (e) => { state.failStopCount = e.targe
 const _failRetrySel = document.getElementById('failRetryAfter');
 if (_failRetrySel) _failRetrySel.onchange = (e) => { state.failRetryAfter = e.target.value; saveState(); if (state.batchActive) pushLiveSettings(); };
 
+// ════════════════════════════════════════════════════════════════
+// 🛡 Safety Gate + Fact check (v3.46.0) — settings, job fields, UI
+// ════════════════════════════════════════════════════════════════
+// "Your other domains" text → clean host names for job.gateSiteDomains:
+// split on commas / spaces, lower-case, drop scheme, path, port and a leading
+// "www." (or "*."). Duplicates and non-host junk are dropped.
+function parseGateSiteDomains(text) {
+  const out = [];
+  String(text || '').split(/[\s,;]+/).forEach((raw) => {
+    let h = raw.trim().toLowerCase().replace(/^\*\./, '');
+    if (!h) return;
+    if (!/^[a-z][a-z0-9+.-]*:\/\//.test(h)) h = 'http://' + h.replace(/^\/+/, '');
+    try { h = new URL(h).hostname; } catch (e) { return; }
+    h = h.replace(/\.+$/, '').replace(/^www\./, '');
+    if (!h || !/^[a-z0-9.-]+$/.test(h) || !/[a-z0-9]/.test(h)) return;
+    if (!out.includes(h)) out.push(h);
+  });
+  return out;
+}
+
+// Job fields for the Safety Gate + Fact check (EXT-SPEC 2.1). Used by BOTH
+// job builders (Start and resolveRunConfig) so they can never drift apart.
+// `prompt` is the selected run prompt (its webSearch flag).
+function safetyGateJobFields(prompt) {
+  const fcId = hasFactCheckPrompt(state.factCheckPromptId) ? state.factCheckPromptId : defaultFactCheckPromptId();
+  const fcPrompt = state.prompts.find(p => p.id === fcId && p.type === 'factcheck');
+  return {
+    gateEnabled: (state.gateEnabled !== 'off'),
+    gateLinkCheck: (state.gateLinkCheck !== 'off'),
+    gateNewFaq: (state.gateNewFaq === 'no' ? 'no' : 'auto'),
+    gateSiteDomains: parseGateSiteDomains(state.gateSiteDomains),
+    factCheck: (state.factCheck !== 'off'),
+    // '' = the same AI as the run; otherwise resolved exactly like fallbackAi.
+    factCheckAi: (state.factCheckAiId ? (resolveAiFields(state.factCheckAiId) || '') : ''),
+    // '' = none chosen → the background uses its built-in prompts/fact-check.txt.
+    factCheckPrompt: fcPrompt ? String(fcPrompt.text || '') : '',
+    factCheckOnError: (state.factCheckOnError === 'save' ? 'save' : 'keep'),
+    promptWebSearch: !!(prompt && prompt.webSearch)
+  };
+}
+
+// One line for the Start confirm dialog.
+function safetyGateSummary() {
+  if (state.gateEnabled === 'off') return 'Safety Gate: OFF — AI edits are saved WITHOUT safety checks or fact check';
+  let line = 'Safety Gate: ON' + (state.gateLinkCheck === 'off' ? ' (new links not tested)' : ' (new links tested)');
+  if (state.factCheck === 'off') return line + ' · Fact check: OFF';
+  const fcAi = state.factCheckAiId ? resolveAiFields(state.factCheckAiId) : null;
+  line += ' · Fact check: ON with ' + (fcAi ? fcAi.aiName : 'the same AI') +
+    (state.factCheckOnError === 'save' ? ' (saves anyway if the check breaks)' : ' (keeps the original if the check breaks)');
+  return line;
+}
+
+// While the Safety Gate is Off the background skips the fact check too, so
+// show a note and dim the fact-check options (they stay editable).
+function applyGateUi() {
+  const off = state.gateEnabled === 'off';
+  const note = document.getElementById('gateOffNote');
+  if (note) note.style.display = off ? '' : 'none';
+  const fc = document.getElementById('factCheckBlock');
+  if (fc) fc.style.opacity = off ? '0.5' : '';
+}
+
+function renderFactCheckAiDropdown() {
+  const el = document.getElementById('factCheckAiId');
+  if (!el) return;
+  if (state.factCheckAiId && !hasAIProvider(state.factCheckAiId)) state.factCheckAiId = '';
+  const opts = ['<option value="">Same AI as the run</option>'].concat(
+    allAIProviders().map(a => '<option value="' + escapeHtml(a.id) + '">' + escapeHtml(a.name) + (isApiAI(a) ? ' (API)' : ' (web)') + '</option>')
+  );
+  el.innerHTML = opts.join('');
+  el.value = state.factCheckAiId || '';
+  el.onchange = (e) => { state.factCheckAiId = e.target.value; saveState(); if (state.batchActive) pushLiveSettings(); };
+}
+
+// Lists ONLY prompts of type 'factcheck'. Empty choice → the seeded one.
+function renderFactCheckPromptDropdown() {
+  const el = document.getElementById('factCheckPromptId');
+  if (!el) return;
+  if (!hasFactCheckPrompt(state.factCheckPromptId)) state.factCheckPromptId = defaultFactCheckPromptId();
+  const list = factCheckPrompts();
+  el.innerHTML = list.length
+    ? list.map(p => '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + '</option>').join('')
+    : '<option value="">Built-in fact-check prompt (no fact-check prompt saved yet)</option>';
+  el.value = state.factCheckPromptId || '';
+  el.onchange = (e) => { state.factCheckPromptId = e.target.value; saveState(); renderPromptList(); if (state.batchActive) pushLiveSettings(); };
+}
+
+const _gateEnSel = document.getElementById('gateEnabled');
+if (_gateEnSel) _gateEnSel.onchange = (e) => { state.gateEnabled = (e.target.value === 'off') ? 'off' : 'on'; applyGateUi(); saveState(); if (state.batchActive) pushLiveSettings(); };
+const _gateLinkSel = document.getElementById('gateLinkCheck');
+if (_gateLinkSel) _gateLinkSel.onchange = (e) => { state.gateLinkCheck = (e.target.value === 'off') ? 'off' : 'on'; saveState(); if (state.batchActive) pushLiveSettings(); };
+const _gateFaqSel = document.getElementById('gateNewFaq');
+if (_gateFaqSel) _gateFaqSel.onchange = (e) => { state.gateNewFaq = (e.target.value === 'no') ? 'no' : 'auto'; saveState(); if (state.batchActive) pushLiveSettings(); };
+const _gateDomInp = document.getElementById('gateSiteDomains');
+if (_gateDomInp) _gateDomInp.onchange = (e) => {
+  state.gateSiteDomains = parseGateSiteDomains(e.target.value).join(', ');
+  e.target.value = state.gateSiteDomains;   // show the cleaned list
+  saveState();
+  if (state.batchActive) pushLiveSettings();
+};
+const _factSel = document.getElementById('factCheck');
+if (_factSel) _factSel.onchange = (e) => { state.factCheck = (e.target.value === 'off') ? 'off' : 'on'; applyGateUi(); saveState(); if (state.batchActive) pushLiveSettings(); };
+const _factErrSel = document.getElementById('factCheckOnError');
+if (_factErrSel) _factErrSel.onchange = (e) => { state.factCheckOnError = (e.target.value === 'save') ? 'save' : 'keep'; saveState(); if (state.batchActive) pushLiveSettings(); };
+
 const _dlOrigBtn = document.getElementById('downloadOriginalsBtn');
 if (_dlOrigBtn) _dlOrigBtn.onclick = downloadOriginalsZip;
 const _clrOrigBtn = document.getElementById('clearOriginalsBtn');
@@ -3885,7 +4320,7 @@ function refreshSaveGate() {
 const _CONFIG_CONTROL_IDS = new Set(['runSiteSelect','runAISelect','runPromptSelect','parallelCount']);
 const _SETTINGS_IGNORE_IDS = new Set(['slugTextarea','slugFile','importFile',
   'wpName','wpUrl','wpUpdateMode','wpCredentialMode','wpUser','wpAppPassword',
-  'aiName','aiMode','aiUrl','aiModel','aiApiKey','promptName','promptType','promptText']);
+  'aiName','aiMode','aiUrl','aiModel','aiApiKey','promptName','promptType','promptText','promptWebSearch']);
 document.addEventListener('change', (ev) => {
   const t = ev.target;
   if (!t || !t.id) return;
@@ -3920,7 +4355,8 @@ async function factoryResetAll() {
     // reappear after the reload (this is why a plain clear looked "not working").
     defaultsV5_installed: true, defaultsV3_installed: true, defaultsV4_installed: true,
     promptsV8_installed: true, auditPromptInstalled_v1: true,
-    bigArticleDefaults_v1: true, preservePromptInstalled_v1: true
+    bigArticleDefaults_v1: true, preservePromptInstalled_v1: true,
+    safetyGatePromptsInstalled_v1: true
   });
   await chrome.storage.local.set(fresh);
 }
