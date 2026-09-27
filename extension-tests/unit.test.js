@@ -964,6 +964,284 @@ describe('fact-check wait (waitForFactCheckJson)', () => {
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────
+// v3.46.0: an edit of a prompt that is NOT a Safety Gate prompt is
+// fact-checked together with that prompt (EDITING INSTRUCTIONS block).
+describe('fact-check editing instructions (prompts that are not Safety Gate prompts)', () => {
+  const bar = (label) => '══════════════════════  ' + label + '  ══════════════════════';
+  const LABEL = 'EDITING INSTRUCTIONS THE EDITOR FOLLOWED';
+  const EXAMPLE = '{"verdict": "pass", "issues": []}';
+  const LEGACY = 'AFFILIATE EDITOR for [[SITE_DOMAIN]] on [[TODAY]] ("[[POST_TITLE]]"). Remove specific price claims. ' +
+    'Add a "Last updated [Month Year]" line. Log your work like this:\n```json\n' + EXAMPLE + '\n```\nThen the HTML.';
+  const QUOTE = 'Knowing how to check tyre pressure at home saves fuel';
+  const HIGH = { severity: 'high', category: 'new_claim_unverified', quote: QUOTE, problem: 'Unverified.', fix: 'Remove it.' };
+  const blockOf = (payload) => {
+    const a = payload.indexOf(bar(LABEL + ' START'));
+    const z = payload.indexOf(bar(LABEL + ' END'));
+    return (a < 0 || z < a) ? null : payload.slice(a + bar(LABEL + ' START').length, z).trim();
+  };
+
+  test('buildFactCheckPayload: the block comes after the edited article and before the instructions; tokens substituted in it only', () => {
+    const c = loadBackground();
+    c.__setJob({ site: { url: 'https://example.org' }, promptWebSearch: false });
+    const out = c.buildFactCheckPayload('Check it. Date: [[TODAY]].', '<p>orig [[TODAY]]</p>', '<p>edit</p>',
+      { postTitle: 'Best Pans', editingInstructions: '\n' + LEGACY + '\n' });
+    const want = LEGACY.replace('[[SITE_DOMAIN]]', 'example.org').replace('[[TODAY]]', localYmd()).replace('[[POST_TITLE]]', 'Best Pans');
+    assert.equal(out,
+      bar('ORIGINAL ARTICLE HTML START') + '\n\n<p>orig [[TODAY]]</p>\n\n' + bar('ORIGINAL ARTICLE HTML END') + '\n\n\n' +
+      bar('EDITED ARTICLE HTML START') + '\n\n<p>edit</p>\n\n' + bar('EDITED ARTICLE HTML END') + '\n\n\n' +
+      bar(LABEL + ' START') + '\n\n' + want + '\n\n' + bar(LABEL + ' END') + '\n\n\n' +
+      bar('INSTRUCTIONS') + '\n\nCheck it. Date: ' + localYmd() + '.');
+    // no / empty editing instructions: exactly the old layout
+    const plainOut = c.buildFactCheckPayload('Check it.', '<p>o</p>', '<p>e</p>');
+    for (const e of [undefined, '', '   \n ']) {
+      assert.equal(c.buildFactCheckPayload('Check it.', '<p>o</p>', '<p>e</p>', { editingInstructions: e }), plainOut);
+    }
+    assert.ok(!plainOut.includes(LABEL + ' START'));
+  });
+
+  test('factCheckEditingText: the saved prompt + PRIORITY FIX note for other prompts, nothing for Safety Gate prompts', () => {
+    const c = loadBackground();
+    const banner = c.__run('PRIORITY_FIX_BANNER');
+    c.__setJob({ site: { url: 'https://example.org' }, prompt: LEGACY });
+    assert.equal(c.factCheckEditingText(false, ''), LEGACY);
+    assert.equal(c.factCheckEditingText(false, 'NOTE 1'), LEGACY + '\n\n' + banner + '\nNOTE 1');
+    assert.equal(c.factCheckEditingText(true, 'NOTE 1'), '', 'a Safety Gate reply gets no block');
+    assert.equal(c.factCheckEditingText(undefined, ''), '', 'unknown kind: no block');
+    // the selected prompt is a Safety Gate prompt: an older recovered reply's prompt is unknown
+    c.__setJob({ site: { url: 'https://example.org' }, prompt: EDITOR_PROMPT });
+    assert.equal(c.factCheckEditingText(false, 'NOTE 1'), '');
+    c.__setJob({ site: { url: 'https://example.org' }, prompt: '  ' });
+    assert.equal(c.factCheckEditingText(false, 'NOTE 1'), '');
+    // the same text generateHtmlForArticle sends (jobPromptWithFixNote)
+    c.__setJob({ site: { url: 'https://example.org' }, prompt: LEGACY });
+    assert.equal(c.jobPromptWithFixNote('NOTE 2'), c.factCheckEditingText(false, 'NOTE 2'));
+    assert.equal(c.jobPromptWithFixNote(''), LEGACY);
+  });
+
+  test('the block is capped at 30,000 characters: start and end (the PRIORITY FIX note) kept, marker in the middle', () => {
+    const c = loadBackground();
+    c.__setJob({ site: { url: 'https://example.org' } });
+    const max = c.__run('FACT_CHECK_EDIT_MAX');
+    assert.equal(max, 30000);
+    const long = 'START-OF-PROMPT ' + 'a'.repeat(25000) + ' MIDDLE-MARKER ' + 'b'.repeat(25000) + '\n\n' + c.__run('PRIORITY_FIX_BANNER') + '\nNOTE-AT-THE-END';
+    const block = c.factCheckEditingBlockText(long);
+    assert.ok(block.length <= max, String(block.length));
+    assert.ok(block.length > max - 100, String(block.length));
+    assert.ok(block.startsWith('START-OF-PROMPT '));
+    assert.ok(block.endsWith('NOTE-AT-THE-END'));
+    assert.ok(block.includes(c.__run('PRIORITY_FIX_BANNER')), 'the PRIORITY FIX note is kept');
+    assert.ok(!block.includes('MIDDLE-MARKER'));
+    const m = /\n\n\[…shortened: (\d+) characters of the editing instructions are left out here…\]\n\n/.exec(block);
+    assert.ok(m, 'marker present');
+    assert.equal(block.length - m[0].length + Number(m[1]), long.length, 'kept + left out = the whole text');
+    // the payload carries exactly that block
+    const payload = c.buildFactCheckPayload('Check.', '<p>o</p>', '<p>e</p>', { editingInstructions: long });
+    assert.equal(blockOf(payload), block);
+    // at the limit: unchanged
+    const exact = 'x'.repeat(max);
+    assert.equal(c.factCheckEditingBlockText(exact), exact);
+    assert.ok(c.factCheckEditingBlockText(exact + 'y').includes('[…shortened: '));
+  });
+
+  // applySafetyPipeline → runFactCheck → runFactCheckInTab (stubbed: records
+  // the payload and the echo-guard text, answers like the fake fact check).
+  // The fact-check prompt names the block (as prompts/fact-check.txt does);
+  // only then is the block sent (factCheckPromptKnowsBlock).
+  const FC_KNOWS = 'Check it (the ' + LABEL + ' block is data). [[TODAY]]';
+  const pipeline = (prompt, links, answers, fcPrompt) => {
+    const c = loadBackground();
+    // web search on for the Safety Gate prompt (its no-research rules are not under test here)
+    gateJob(c, { prompt, gateLinkCheck: false, promptWebSearch: /APU-END/.test(prompt), factCheck: true, factCheckOnError: 'keep', factCheckPrompt: fcPrompt === undefined ? FC_KNOWS : fcPrompt });
+    const calls = [];
+    c.runFactCheckInTab = async (ai, payload, instructions, tag, timeoutMs, editingText) => {
+      calls.push({ payload, instructions, editingText });
+      return { parsed: { ok: true, audit: answers[calls.length - 1] }, aiSessionUrl: '' };
+    };
+    const fixes = [];
+    c.regenerateForFactCheckFix = async (ctx, ref, note, info) => {
+      fixes.push(note);
+      if (info) info.gatePrompt = /APU-END/.test(prompt);
+      return GOOD_BLOCK + (/APU-END/.test(prompt) ? '\n' + END : '');
+    };
+    const ctx = { slug: 's', tag: '[1/1]', num: 1, total: 1, originalHtml: ORIG_BLOCK,
+      aiHtml: GOOD_BLOCK + (/APU-END/.test(prompt) ? '\n' + END : ''),
+      attemptLinks: Object.assign({ rawInput: 's', postTitle: 'Tyre Guide' }, links), attemptTabs: { edit: null, ai: null }, wpItem: { title: 'x' } };
+    return { c, calls, fixes, ctx };
+  };
+
+  test('legacy prompt: both fact checks (first edit, fix round) carry the prompt + the PRIORITY FIX note that was sent', async () => {
+    const { c, calls, fixes, ctx } = pipeline(LEGACY, { gatePrompt: false, auditFixNote: 'EARLIER NOTE' },
+      [{ verdict: 'fix', issues: [HIGH] }, { verdict: 'pass', issues: [] }]);
+    const banner = c.__run('PRIORITY_FIX_BANNER');
+    const sub = (s) => s.replace('[[SITE_DOMAIN]]', 'tubetyre.com').replace('[[TODAY]]', localYmd()).replace('[[POST_TITLE]]', 'Tyre Guide');
+    assert.equal(await c.applySafetyPipeline(ctx), GOOD_BLOCK);
+    assert.equal(calls.length, 2);
+    // first check: the saved prompt (tokens substituted) + the note the first edit was sent with
+    const b1 = blockOf(calls[0].payload);
+    assert.equal(b1, sub(LEGACY) + '\n\n' + banner + '\nEARLIER NOTE');
+    assert.ok(!b1.includes('[['));
+    assert.equal(calls[0].editingText, b1, 'the echo guard gets the block as sent');
+    // fix round: its prompt carried the earlier note + the fact-check fix note
+    assert.equal(fixes.length, 1);
+    const b2 = blockOf(calls[1].payload);
+    assert.equal(b2, sub(LEGACY) + '\n\n' + banner + '\nEARLIER NOTE\n\n' + fixes[0]);
+    assert.match(b2, /A fact-check of your previous edit of this exact article found the problems listed below/);
+    assert.ok(b2.includes(QUOTE), 'the fix note (with the quote) is in the block');
+    assert.equal(calls[1].editingText, b2);
+    // the block sits before the fact-check instructions, which stay last
+    assert.ok(calls[0].payload.endsWith(bar('INSTRUCTIONS') + '\n\n' + FC_KNOWS.replace('[[TODAY]]', localYmd())));
+    assert.ok(c.__logs().some((l) => /its editing instructions \(\d+ chars, with the PRIORITY FIX note\) go with it/.test(l)));
+  });
+
+  test('legacy prompt without a note: the block is the prompt alone', async () => {
+    const { c, calls, ctx } = pipeline('Remove specific price claims. Keep everything else.', { gatePrompt: false }, [{ verdict: 'pass', issues: [] }]);
+    assert.equal(await c.applySafetyPipeline(ctx), GOOD_BLOCK);
+    assert.equal(blockOf(calls[0].payload), 'Remove specific price claims. Keep everything else.');
+    assert.ok(!blockOf(calls[0].payload).includes('PRIORITY FIX'));
+  });
+
+  test('a fact-check prompt that does not describe the block (the pre-release copy, an own prompt) gets no block, and the log warns', async () => {
+    const PRE = fs.readFileSync(path.join(__dirname, 'fixtures', 'fact-check-3.46.0-prerelease.txt'), 'utf8').trim();
+    for (const fc of [PRE, 'Check the edit. Reply in JSON.']) {
+      const { c, calls, fixes, ctx } = pipeline(LEGACY, { gatePrompt: false, auditFixNote: 'EARLIER NOTE' },
+        [{ verdict: 'fix', issues: [HIGH] }, { verdict: 'pass', issues: [] }], fc);
+      assert.equal(c.factCheckPromptKnowsBlock(fc), false);
+      assert.equal(await c.applySafetyPipeline(ctx), GOOD_BLOCK);
+      assert.equal(calls.length, 2);
+      assert.equal(fixes.length, 1);
+      for (const call of calls) {
+        assert.ok(!call.payload.includes(LABEL + ' START') && !call.payload.includes(LABEL + ' END'), 'no EDITING INSTRUCTIONS block');
+        assert.equal(call.editingText, '', 'the echo guard gets no block text either');
+        assert.ok(call.payload.includes(bar('EDITED ARTICLE HTML END') + '\n\n\n' + bar('INSTRUCTIONS')));
+      }
+      // exactly the payload without editing instructions
+      assert.equal(calls[0].payload, c.buildFactCheckPayload(fc, ORIG_BLOCK, GOOD_BLOCK, { postTitle: 'Tyre Guide' }));
+      const warns = c.__logs().filter((l) => /^warn .*the chosen fact-check prompt does not describe the EDITING INSTRUCTIONS THE EDITOR FOLLOWED block/.test(l));
+      assert.equal(warns.length, 2, 'one warning per fact check');
+      assert.ok(warns[0].includes('Replace the fact-check prompt text with prompts/fact-check.txt'));
+      assert.ok(!c.__logs().some((l) => /its editing instructions/.test(l)));
+    }
+    // the shipped prompt describes the block; a Safety Gate edit never warns
+    const c = loadBackground();
+    assert.equal(c.factCheckPromptKnowsBlock(FACT_PROMPT), true);
+    assert.equal(c.factCheckPromptKnowsBlock(''), false);
+    const sg = pipeline(EDITOR_PROMPT, { gatePrompt: true }, [{ verdict: 'pass', issues: [] }], 'Check the edit. Reply in JSON.');
+    assert.equal(await sg.c.applySafetyPipeline(sg.ctx), GOOD_BLOCK);
+    assert.ok(!sg.c.__logs().some((l) => /does not describe the/.test(l)));
+  });
+
+  test('the panel upgrades only the unedited pre-release fact-check prompt (hash), and uses the same block label', () => {
+    const crypto = require('crypto');
+    const src = fs.readFileSync(path.join(EXT_DIR, 'panel.js'), 'utf8');
+    const PRE = fs.readFileSync(path.join(__dirname, 'fixtures', 'fact-check-3.46.0-prerelease.txt'), 'utf8');
+    const hashes = JSON.parse(/const OLD_SHIPPED_FACT_CHECK_SHA256 = (\[[^\]]*\]);/.exec(src)[1].replace(/'/g, '"'));
+    const sha = (t) => crypto.createHash('sha256').update(t).digest('hex');
+    assert.deepEqual(hashes, [sha(PRE.trim())]);
+    assert.ok(!hashes.includes(sha(FACT_PROMPT.trim())), 'the shipped prompt is never "upgraded"');
+    assert.ok(!PRE.includes(LABEL), 'the pre-release text does not describe the block');
+    assert.ok(FACT_PROMPT.includes(LABEL), 'the shipped prompt describes the block');
+    assert.equal(/const FACT_CHECK_EDIT_LABEL = '([^']+)';/.exec(src)[1], loadBackground().__run('FACT_CHECK_EDIT_LABEL'));
+    // the fixture is the text the pre-release builds shipped (when git has that commit)
+    let shipped = null;
+    try {
+      shipped = execFileSync('git', ['-C', REPO_ROOT, 'show', '51b6e47:extension/prompts/fact-check.txt'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch (e) {}
+    if (shipped !== null) assert.equal(PRE, shipped);
+  });
+
+  test('Safety Gate prompt: no block, neither for the first edit nor after the fix round', async () => {
+    const { c, calls, fixes, ctx } = pipeline(EDITOR_PROMPT, { gatePrompt: true, auditFixNote: 'EARLIER NOTE' },
+      [{ verdict: 'fix', issues: [HIGH] }, { verdict: 'pass', issues: [] }]);
+    assert.equal(await c.applySafetyPipeline(ctx), GOOD_BLOCK);
+    assert.equal(calls.length, 2);
+    assert.equal(fixes.length, 1);
+    for (const call of calls) {
+      assert.ok(!call.payload.includes(LABEL + ' START') && !call.payload.includes(LABEL + ' END'), 'no EDITING INSTRUCTIONS block');
+      assert.equal(call.editingText, '');
+      assert.ok(call.payload.includes(bar('EDITED ARTICLE HTML END') + '\n\n\n' + bar('INSTRUCTIONS')));
+    }
+    assert.ok(!c.__logs().some((l) => /its editing instructions/.test(l)));
+    // a recovered reply that carries the end marker is a Safety Gate reply whatever was recorded
+    const rec = pipeline(LEGACY, { gatePrompt: false, recoverFromUrl: 'https://chatgpt.com/c/1' }, [{ verdict: 'pass', issues: [] }]);
+    rec.ctx.aiHtml = GOOD_BLOCK + '\n' + END;
+    assert.equal(await rec.c.applySafetyPipeline(rec.ctx), GOOD_BLOCK);
+    assert.ok(!rec.calls[0].payload.includes(LABEL + ' START'));
+  });
+
+  test('echo guard (isOwnFactCheckText): the block and pieces of it are never the reply', () => {
+    const c = loadBackground();
+    c.__setJob({ site: { url: 'https://example.org' }, prompt: LEGACY });
+    const editing = c.factCheckEditingBlockText(c.factCheckEditingText(false, ''));
+    const REAL = '{"verdict": "fix", "issues": [{"severity": "high", "category": "fact_wrong", "quote": "' + QUOTE + '", "problem": "p", "fix": "f"}]}';
+    // the banner lines of our own message
+    assert.equal(c.isOwnFactCheckText(bar(LABEL + ' START') + '\n' + EXAMPLE, '', ''), true);
+    assert.equal(c.isOwnFactCheckText('x ' + LABEL + ' END', '', ''), true);
+    assert.equal(c.isOwnFactCheckText('ORIGINAL ARTICLE HTML START', '', ''), true);
+    // a JSON example of the editing prompt, read as a code block (whitespace differs)
+    assert.equal(c.isOwnFactCheckText('{"verdict": "pass",\n   "issues": []}', '', editing), true);
+    assert.equal(c.isOwnFactCheckText(EXAMPLE, '', ''), false, 'without the block that text would be a reply');
+    // only pieces that hold a "verdict": a status line that also occurs in the prompt is the AI at work
+    assert.ok(editing.includes('Then the HTML.'));
+    assert.equal(c.isOwnFactCheckText('Then the HTML.', '', editing), false);
+    // real replies stay replies, also when they name the block in a problem text
+    assert.equal(c.isOwnFactCheckText(REAL, '', editing), false);
+    assert.equal(c.isOwnFactCheckText('The ' + LABEL + ' block asks for it. ' + REAL, '', editing), false);
+    // the page added text around the example (a line number, a "json" / "Copy" header, a stray brace):
+    // still our own text, as long as every {...} with a "verdict" is one the block holds
+    assert.equal(c.isOwnFactCheckText('1' + EXAMPLE, '', editing), true);
+    assert.equal(c.isOwnFactCheckText('json\nCopy\n' + EXAMPLE, '', editing), true);
+    assert.equal(c.isOwnFactCheckText('1 {\n2 ' + EXAMPLE, '', editing), true);
+    assert.equal(c.isOwnFactCheckText('json\nCopy\n' + EXAMPLE, '', ''), false, 'without the block that text would be a reply');
+    // a real verdict next to the example is the reply
+    assert.equal(c.isOwnFactCheckText('json\nCopy\n' + EXAMPLE + '\n' + REAL, '', editing), false);
+    assert.equal(c.isOwnFactCheckText('1' + REAL, '', editing), false);
+  });
+
+  test('parseFactCheckReply never reads JSON from the block', () => {
+    const c = loadBackground();
+    c.__setJob({ site: { url: 'https://example.org' }, prompt: LEGACY });
+    // our whole message read back: the only valid verdict in it is the prompt's example
+    const payload = c.buildFactCheckPayload('Reply with one JSON object.', '<p>o</p>', '<p>e</p>', { editingInstructions: c.factCheckEditingText(false, '') });
+    assert.equal(c.parseFactCheckReply(payload).ok, false);
+    assert.equal(c.parseFactCheckReply(bar(LABEL + ' START') + '\n```json\n' + EXAMPLE + '\n```\n' + bar(LABEL + ' END')).ok, false);
+    // a block without its END banner (cut-off read) is dropped up to the end
+    assert.equal(c.parseFactCheckReply(bar(LABEL + ' START') + '\n' + EXAMPLE).ok, false);
+    // text outside the block is still read; the most severe verdict wins as before
+    const around = bar(LABEL + ' START') + '\n' + EXAMPLE + '\n' + bar(LABEL + ' END') + '\n```json\n{"verdict":"reject","issues":[]}\n```';
+    assert.equal(c.parseFactCheckReply(around).audit.verdict, 'reject');
+    // a reply that only names the block is parsed normally
+    assert.equal(c.parseFactCheckReply('Per the ' + LABEL + ' block: ```json\n{"verdict":"pass","issues":[]}\n```').audit.verdict, 'pass');
+  });
+
+  test('waitForFactCheckJson ignores a code block of the editing instructions (page fallback) and waits for the real reply', async () => {
+    const REAL_FIX = '{"verdict":"fix","issues":[{"severity":"high","category":"new_claim_unverified","quote":"q","problem":"p","fix":"f"}]}';
+    const run = async (editingText) => {
+      const c = loadBackground();
+      const clock = fakeClock(c);
+      c.__setJob({ limitGuard: true, aiTimeout: 1800, site: { url: 'https://example.org' }, prompt: LEGACY });
+      const t0 = clock.now();
+      // for 100 s only the prompt's example is on the page (no assistant message yet), then the reply
+      c.runInTab = async (tabId, fn) => (fn.name === 'readAIJsonSnapshot'
+        ? { result: (clock.now() - t0 < 100000)
+          ? { isGenerating: false, texts: ['{"verdict": "pass",\n  "issues": []}'], messageText: '' }
+          : { isGenerating: false, texts: [REAL_FIX], messageText: 'json ' + REAL_FIX } }
+        : { result: {} });
+      const r = await c.waitForFactCheckJson(1, 1800000, 'chatgpt', { tag: '[t]', editingText });
+      return { verdict: r.audit.verdict, elapsed: clock.now() - t0 };
+    };
+    const c0 = loadBackground();
+    c0.__setJob({ site: { url: 'https://example.org' }, prompt: LEGACY });
+    const guarded = await run(c0.factCheckEditingBlockText(c0.factCheckEditingText(false, '')));
+    assert.equal(guarded.verdict, 'fix');
+    assert.ok(guarded.elapsed >= 100000, String(guarded.elapsed));
+    // control: without the block text the example would have been taken as a "pass"
+    const unguarded = await run('');
+    assert.equal(unguarded.verdict, 'pass');
+    assert.ok(unguarded.elapsed < 100000, String(unguarded.elapsed));
+  });
+});
+
 describe('parseFactCheckReply: several verdicts', () => {
   const c = loadBackground();
   const V = (verdict, n) => JSON.stringify({ verdict, issues: Array.from({ length: n || 0 }, (_, i) => ({ severity: 'high', quote: 'q' + i, problem: 'p' })) });

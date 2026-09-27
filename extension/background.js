@@ -1381,6 +1381,14 @@ function buildAuditFixNote(issues) {
     PRIORITY_FIX_TEXT.auditFoot;
 }
 
+// The editing prompt as the editor chat gets it: the saved run prompt plus,
+// when one is set, the PRIORITY FIX note behind its banner (tokens are
+// substituted later by the payload builders). Used by generateHtmlForArticle
+// and by the fact check (its EDITING INSTRUCTIONS block).
+function jobPromptWithFixNote(note) {
+  return runtime.job.prompt + (note ? '\n\n' + PRIORITY_FIX_BANNER + '\n' + note : '');
+}
+
 // v3.46.0: PROMPT_ECHO — the AI pasted (part of) a PRIORITY FIX note into the
 // article. Checks the FIXED sentences only: the banner and every head / foot
 // line of the notes (always — they are never article text), plus the gate
@@ -5695,18 +5703,113 @@ async function runSafetyGateStep(ctx, referenceHtml, aiHtml, label, noteText, re
 }
 
 // ── Fact-Check helpers ────────────────────────────────────────────────────
-// Payload: both articles first, then the fact-check instructions (tokens
-// substituted). extra = { postTitle } (optional).
+// v3.46.0: an edit made with a prompt that is NOT a Safety Gate prompt (an
+// affiliate / review prompt that removes prices or adds a "Last updated" line
+// on purpose) is fact-checked together with that prompt, in an EDITING
+// INSTRUCTIONS block, so the changes it asked for are not reported as lost
+// information. Safety Gate prompts never get the block (their rules match the
+// fact-check prompt, and the payload would get huge), and neither does a
+// fact-check prompt that does not describe the block (factCheckPromptKnowsBlock:
+// an older stored copy of the built-in prompt, an own prompt). Longer instructions
+// keep their start and their end (the PRIORITY FIX note) with a marker in
+// the middle.
+const FACT_CHECK_EDIT_LABEL = 'EDITING INSTRUCTIONS THE EDITOR FOLLOWED';
+const FACT_CHECK_EDIT_MAX = 30000;
+function capFactCheckEditingText(text) {
+  const s = String(text || '').trim();
+  if (s.length <= FACT_CHECK_EDIT_MAX) return s;
+  const marker = (n) => '\n\n[…shortened: ' + n + ' characters of the editing instructions are left out here…]\n\n';
+  const room = FACT_CHECK_EDIT_MAX - marker('000000000').length;
+  const headLen = Math.ceil(room * 0.6);
+  const tailLen = room - headLen;
+  return s.slice(0, headLen) + marker(s.length - headLen - tailLen) + s.slice(s.length - tailLen);
+}
+// The EDITING INSTRUCTIONS block's text exactly as it is sent: tokens
+// substituted (as in the editor's payload), then capped. '' = no block.
+function factCheckEditingBlockText(editingText, extra) {
+  const raw = String(editingText || '').trim();
+  if (!raw) return '';
+  return capFactCheckEditingText(substitutePromptTokens(raw, promptTokenValues(extra)));
+}
+// The editing instructions to send with the fact check of one edit, or ''.
+// editGatePrompt = the kind of prompt that produced the edit (see
+// replyFromGatePrompt); note = the PRIORITY FIX note(s) sent with it. A
+// Safety Gate reply gets none. Neither does an older recovered reply while a
+// Safety Gate prompt is selected: the prompt that chat got is not known.
+function factCheckEditingText(editGatePrompt, note) {
+  if (editGatePrompt !== false || promptRequiresEndMarker()) return '';
+  if (!String((runtime.job && runtime.job.prompt) || '').trim()) return '';
+  return jobPromptWithFixNote(note);
+}
+// True when the fact-check prompt describes the EDITING INSTRUCTIONS block
+// (names its label, as prompts/fact-check.txt does): only then is the block
+// sent (runFactCheck).
+function factCheckPromptKnowsBlock(promptText) {
+  return String(promptText || '').indexOf(FACT_CHECK_EDIT_LABEL) >= 0;
+}
+
+// Payload: both articles first, then (optional) the editing instructions the
+// editor followed, then the fact-check instructions (tokens substituted).
+// extra = { postTitle, editingInstructions } (both optional;
+// editingInstructions = the editor's prompt + PRIORITY FIX note, raw).
 function buildFactCheckPayload(promptText, originalHtml, editedHtml, extra) {
   const head = (label) => '══════════════════════  ' + label + '  ══════════════════════';
+  const editing = factCheckEditingBlockText(extra && extra.editingInstructions, extra);
   return head('ORIGINAL ARTICLE HTML START') + '\n\n' +
     String(originalHtml || '').trim() + '\n\n' +
     head('ORIGINAL ARTICLE HTML END') + '\n\n\n' +
     head('EDITED ARTICLE HTML START') + '\n\n' +
     String(editedHtml || '').trim() + '\n\n' +
     head('EDITED ARTICLE HTML END') + '\n\n\n' +
+    (editing
+      ? head(FACT_CHECK_EDIT_LABEL + ' START') + '\n\n' +
+        editing + '\n\n' +
+        head(FACT_CHECK_EDIT_LABEL + ' END') + '\n\n\n'
+      : '') +
     head('INSTRUCTIONS') + '\n\n' +
     substitutePromptTokens(String(promptText || '').trim(), promptTokenValues(extra));
+}
+
+// The EDITING INSTRUCTIONS block(s) of our own fact-check message removed
+// (from its START banner to its END banner, or to the end of the text): the
+// editor's prompt may hold JSON examples, which are never a verdict.
+function stripFactCheckEditingBlock(text) {
+  const s = String(text || '');
+  if (s.indexOf(FACT_CHECK_EDIT_LABEL) < 0) return s;
+  return s.replace(new RegExp('[^\\n]*' + FACT_CHECK_EDIT_LABEL + ' START[\\s\\S]*?(?:' + FACT_CHECK_EDIT_LABEL + ' END[^\\n]*|$)', 'g'), '\n');
+}
+
+// Echo guard of the fact-check waiter: true when `text` (a message or a code
+// block read from the page) is part of OUR fact-check message, not the
+// reply — it carries a banner of the payload, repeats the fact-check prompt
+// (promptText), or is a piece of the editing instructions we sent that
+// holds a "verdict" (editingText, whitespace ignored: a JSON example of that
+// prompt). Only such pieces: a short status line ("Thinking") that happens
+// to occur in the prompt is still the AI at work. The page may add text
+// around a code block of our message (a line number, a "json" / "Copy"
+// header), so a piece is also ours when every {...} object in it that holds
+// a "verdict" is one the block holds. Fail closed: a reply that is word for
+// word a JSON example of the editing prompt is not read either (the wait
+// then ends as FACT CHECK ERROR).
+const FACT_CHECK_OWN_BANNER_RE = new RegExp('(?:ORIGINAL ARTICLE HTML|EDITED ARTICLE HTML|' + FACT_CHECK_EDIT_LABEL + ') (?:START|END)');
+function isOwnFactCheckText(text, promptText, editingText) {
+  const t = String(text || '');
+  if (FACT_CHECK_OWN_BANNER_RE.test(t)) return true;
+  if (editingText && t.indexOf('"verdict"') >= 0) {
+    const flat = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+    const hay = flat(editingText);
+    if (hay.indexOf(flat(t)) >= 0) return true;
+    const objs = [];
+    for (let i = t.indexOf('{'); i >= 0;) {
+      const j = matchingBraceIndex(t, i);
+      if (j < 0) { i = t.indexOf('{', i + 1); continue; }   // a stray '{': try the next one
+      const o = t.slice(i, j + 1);
+      if (o.indexOf('"verdict"') >= 0) objs.push(o);
+      i = t.indexOf('{', j + 1);
+    }
+    if (objs.length && objs.every((o) => hay.indexOf(flat(o)) >= 0)) return true;
+  }
+  return !!(promptText && detectPromptLeak(t, promptText));
 }
 
 // Index of the '}' that closes the '{' at `open` (string-aware), or -1.
@@ -5766,7 +5869,7 @@ function mostSevereFactCheck(audits) {
 // most severe wins (mostSevereFactCheck). Smart quotes are NOT repaired (a
 // reply that uses them is not valid JSON).
 function parseFactCheckReply(text) {
-  const raw = String(text || '').trim();
+  const raw = stripFactCheckEditingBlock(text).trim();
   if (!raw) return { ok: false, error: 'empty reply' };
   let lastError = 'no JSON object with a "verdict" was found';
   const found = [];
@@ -5980,9 +6083,10 @@ async function factCheckPromptText() {
 // Polls the fact-check tab until the reply holds a valid JSON verdict.
 // Accepts when the AI is not generating, the reply has been stable ≥ 8 s and
 // it parses (code blocks and the message text; of several verdicts the most
-// severe wins). opts = { tag, promptText, aiName } (optional; promptText
-// guards against reading our own prompt back as the "reply", aiName names
-// the fact-check AI in a limit pause).
+// severe wins). opts = { tag, promptText, aiName, editingText } (optional;
+// promptText and editingText — the EDITING INSTRUCTIONS block as sent —
+// guard against reading our own prompt back as the "reply"
+// (isOwnFactCheckText), aiName names the fact-check AI in a limit pause).
 // v3.46.0 review fixes: a static "Thinking…" / "Searching the web…" line (or
 // a stuck stop button) is the AI at work, never a finished reply without
 // JSON — only the overall timeout ends that wait; time spent paused does not
@@ -6010,11 +6114,7 @@ async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
   let everGenerated = false;
   let lastActivityAt = start;
   let peeked = false;
-  const isOwnPrompt = (text) => {
-    const t = String(text || '');
-    if (/(?:ORIGINAL|EDITED) ARTICLE HTML (?:START|END)/.test(t)) return true;
-    return !!(o.promptText && detectPromptLeak(t, o.promptText));
-  };
+  const isOwnPrompt = (text) => isOwnFactCheckText(text, o.promptText, o.editingText);
   const readSnapshot = async () => {
     let snap = null;
     try { snap = (await runInTab(tabId, readAIJsonSnapshot, [providerKind]))?.result || null; } catch (e) {}
@@ -6138,8 +6238,9 @@ async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
 // Browser mode: the fact-check always runs in a NEW chat tab of `ai`, with
 // the same keep-alive / composer-ready / model-limit handling as the edit
 // tab. The tab is always closed afterwards. instructionsText = the prompt as
-// sent (tokens substituted); it only guards against reading it back.
-async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) {
+// sent (tokens substituted) and editingText = the EDITING INSTRUCTIONS block
+// as sent ('' / omitted = none); they only guard against reading them back.
+async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs, editingText) {
   if (!ai.aiUrl) throw factCheckError('the fact-check AI has no web address');
   const providerKind = detectProviderKind(ai.aiUrl);
   const allowWebSearch = runtime.job.promptWebSearch === true;
@@ -6186,7 +6287,7 @@ async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) 
     }
     sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl);
     log('ok', tag + ' 🔎 Fact-check prompt sent through ' + sendResult.method + ' — waiting for the JSON verdict.');
-    const parsed = await waitForFactCheckJson(tabId, timeoutMs, providerKind, { tag, promptText: instructionsText, aiName: ai.aiName });
+    const parsed = await waitForFactCheckJson(tabId, timeoutMs, providerKind, { tag, promptText: instructionsText, aiName: ai.aiName, editingText: editingText || '' });
     sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl);
     return { parsed, aiSessionUrl: sessionUrl };
   } catch (e) {
@@ -6204,7 +6305,12 @@ async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) 
 
 // One AI Fact-Check round → { verdict, issues, dropped, aiSessionUrl, action }.
 // ctx = { tag, referenceHtml (or originalHtml), editedHtml (or aiHtml),
-// attemptLinks, wpItem, fixRound }. Technical failures throw FACT_CHECK_ERROR;
+// attemptLinks, wpItem, fixRound, editGatePrompt, editPromptNote }.
+// editGatePrompt / editPromptNote (optional): the kind of prompt that produced
+// the edit and the PRIORITY FIX note(s) it was sent with (default: the
+// attempt's recorded kind and auditFixNote); an edit of a prompt that is not
+// a Safety Gate prompt is checked together with that prompt (EDITING
+// INSTRUCTIONS block). Technical failures throw FACT_CHECK_ERROR;
 // MODEL_LIMIT / AI_LIMIT / USER_STOPPED keep their own codes (pause / stop).
 async function runFactCheck(ctx) {
   const c = ctx || {};
@@ -6215,8 +6321,31 @@ async function runFactCheck(ctx) {
   const ai = factCheckAiConfig();
   const promptText = await factCheckPromptText();
   if (!promptText) throw factCheckError('no fact-check prompt is available (the chosen prompt is empty and prompts/fact-check.txt could not be read)');
-  const postTitle = (c.attemptLinks && c.attemptLinks.postTitle) || plainPostTitle(c.wpItem && c.wpItem.title);
-  const payload = buildFactCheckPayload(promptText, reference, edited, { postTitle });
+  const links = c.attemptLinks || {};
+  const postTitle = links.postTitle || plainPostTitle(c.wpItem && c.wpItem.title);
+  const editGate = (typeof c.editGatePrompt === 'boolean') ? c.editGatePrompt : replyFromGatePrompt(links, edited);
+  const editNote = (typeof c.editPromptNote === 'string') ? c.editPromptNote : (links.auditFixNote || '');
+  // The block only goes with a fact-check prompt that describes it: an older
+  // stored copy of the built-in prompt (seeded before the block existed) or
+  // an own prompt would get 12–23k characters of editor instructions it has
+  // no rule for (and still report a removed price).
+  const wantedEditing = factCheckEditingText(editGate, editNote);
+  const promptKnowsBlock = factCheckPromptKnowsBlock(promptText);
+  const editingInstructions = promptKnowsBlock ? wantedEditing : '';
+  if (wantedEditing && !promptKnowsBlock) {
+    log('warn', tag + ' 🔎 Fact check: the chosen fact-check prompt does not describe the ' + FACT_CHECK_EDIT_LABEL +
+      ' block (an older copy or an own prompt), so the editing prompt does not go with it and changes that prompt asks for (a removed price, a "Last updated" line) may be reported. Replace the fact-check prompt text with prompts/fact-check.txt.');
+  }
+  const editingShown = factCheckEditingBlockText(editingInstructions, { postTitle });
+  const payload = buildFactCheckPayload(promptText, reference, edited, { postTitle, editingInstructions });
+  if (editingShown) {
+    log('info', tag + ' 🔎 Fact check: the edit came from a prompt that is not a Safety Gate prompt — its editing instructions (' +
+      editingShown.length + ' chars' + (editNote ? ', with the PRIORITY FIX note' : '') +
+      (substitutePromptTokens(editingInstructions.trim(), promptTokenValues({ postTitle })).length > FACT_CHECK_EDIT_MAX ? ', shortened' : '') +
+      ') go with it, so the changes they ask for on purpose are not reported as problems.');
+  } else if (editGate === false && promptRequiresEndMarker()) {
+    log('info', tag + ' 🔎 Fact check: the prompt that produced this recovered reply is not known (a Safety Gate prompt is selected now), so no editing instructions go with it.');
+  }
   const timeoutMs = Math.max(30, Number(runtime.job.aiTimeout) || 180) * 1000;
   setStatus(tag + ' 🔎 Fact check with ' + ai.aiName);
   log('step', tag + ' 🔎 Fact check' + (c.fixRound ? ' (after the fix round)' : '') + ': asking ' + ai.aiName +
@@ -6237,7 +6366,7 @@ async function runFactCheck(ctx) {
       log('ok', tag + ' 🔎 Fact-check reply received (verdict "' + parsed.audit.verdict + '", ' + parsed.audit.issues.length + ' issue(s)).');
     } else {
       const instructions = substitutePromptTokens(promptText, promptTokenValues({ postTitle }));
-      const r = await runFactCheckInTab(ai, payload, instructions, tag, timeoutMs);
+      const r = await runFactCheckInTab(ai, payload, instructions, tag, timeoutMs, editingShown);
       parsed = r.parsed;
       aiSessionUrl = r.aiSessionUrl || '';
     }
@@ -6344,10 +6473,16 @@ async function applySafetyPipeline(ctx) {
 
   // 5) AI Fact-Check, with at most ONE fix round per attempt.
   let fixRoundUsed = false;
+  // The kind of prompt that wrote the edit being checked and the PRIORITY FIX
+  // note(s) it was sent with (the same values its gate step used): an edit of
+  // a prompt that is not a Safety Gate prompt is fact-checked together with
+  // that prompt (runFactCheck).
+  let editGatePrompt = replyFromGatePrompt(links, ctx.aiHtml);
+  let editPromptNote = links.auditFixNote || '';
   for (;;) {
     let fc = null;
     try {
-      fc = await runFactCheck(Object.assign({}, ctx, { referenceHtml: reference, editedHtml: html, fixRound: fixRoundUsed }));
+      fc = await runFactCheck(Object.assign({}, ctx, { referenceHtml: reference, editedHtml: html, fixRound: fixRoundUsed, editGatePrompt, editPromptNote }));
     } catch (e) {
       if (!e || e.code !== 'FACT_CHECK_ERROR') throw e;
       links.factCheck = {
@@ -6405,8 +6540,10 @@ async function applySafetyPipeline(ctx) {
       throw factCheckBlockedError(fc, false, 'The fix round could not produce a new version (' + ((e && e.message) || e) + ')');
     }
     log('step', tag + ' 🔧 Fix round returned ' + fixedHtml.length + ' chars — running the Safety Gate and the fact check again.');
+    editGatePrompt = (typeof fixInfo.gatePrompt === 'boolean') ? fixInfo.gatePrompt : replyFromGatePrompt(links, fixedHtml);
+    editPromptNote = fixRoundNoteText(links, note);
     try {
-      html = await runSafetyGateStep(ctx, reference, fixedHtml, 'fix-round', fixRoundNoteText(links, note), fixInfo.gatePrompt);
+      html = await runSafetyGateStep(ctx, reference, fixedHtml, 'fix-round', editPromptNote, fixInfo.gatePrompt);
     } catch (e) {
       // A blocked fix round: the automatic retry's note also lists the
       // fact-check issues that caused the fix round (v3.46.0).
@@ -6614,9 +6751,7 @@ async function generateHtmlForArticle(tag, num, total, originalHtml, attemptLink
   }
   // Effective prompt: the saved prompt plus (for audit re-runs) this post's
   // own PRIORITY FIX note listing the exact issues to correct.
-  const jobPrompt = runtime.job.prompt + ((attemptLinks && attemptLinks.auditFixNote)
-    ? '\n\n' + PRIORITY_FIX_BANNER + '\n' + attemptLinks.auditFixNote
-    : '');
+  const jobPrompt = jobPromptWithFixNote(attemptLinks && attemptLinks.auditFixNote);
   // v3.46.0: the kind of prompt this attempt sends (the rule set of every
   // later check of its reply, also on a later recovery read of this chat).
   if (attemptLinks) attemptLinks.gatePrompt = promptRequiresEndMarker();

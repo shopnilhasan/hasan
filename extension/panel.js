@@ -108,6 +108,27 @@ async function fetchBundledPromptText(path) {
   }
 }
 
+// v3.46.0: an edit made with a prompt that is not a Safety Gate prompt is
+// fact-checked together with that prompt (an EDITING INSTRUCTIONS block),
+// but only when the fact-check prompt describes that block (names this
+// label, as prompts/fact-check.txt does) — same rule as background.js.
+const FACT_CHECK_EDIT_LABEL = 'EDITING INSTRUCTIONS THE EDITOR FOLLOWED';
+// SHA-256 of the "Fact Check (Safety Gate)" text the earlier 3.46.0
+// pre-release builds seeded (trimmed). It does not describe the block. A
+// stored copy that is still exactly that text (never edited) is replaced with
+// the shipped file on load (loadState); an edited copy is kept.
+const OLD_SHIPPED_FACT_CHECK_SHA256 = ['262c8627d3df07997386aefd7ce95dc3e1c84d9ad36385a8fbae6cb18749f3cc'];
+
+// Hex SHA-256 of a string ('' when Web Crypto is not available).
+async function sha256Hex(text) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    return '';
+  }
+}
+
 function allAIProviders() {
   return BUILTIN_AIS.concat((state.customAIs || []).map(normalizeAIConfig));
 }
@@ -378,6 +399,24 @@ async function loadState() {
       }
       if (added) await chrome.storage.local.set({ prompts: state.prompts });
       if (allPresent) await chrome.storage.local.set({ safetyGatePromptsInstalled_v1: true });
+    }
+  }
+  // v3.46.0: the earlier 3.46.0 pre-release builds seeded an older "Fact
+  // Check (Safety Gate)" text that does not describe the EDITING INSTRUCTIONS
+  // block, and seeding runs only once. A stored copy that is still exactly
+  // that text is replaced with the shipped prompts/fact-check.txt (checked on
+  // every load, so a backup restore of the old text is upgraded too). An
+  // edited copy is kept; the Start dialog and the run log warn about it.
+  {
+    const fc = state.prompts.find(p => p && p.id === SAFETY_GATE_FACTCHECK_PROMPT_ID);
+    const oldText = fc ? String(fc.text || '').trim() : '';
+    if (oldText && oldText.indexOf(FACT_CHECK_EDIT_LABEL) < 0 &&
+        OLD_SHIPPED_FACT_CHECK_SHA256.includes(await sha256Hex(oldText))) {
+      const text = await fetchBundledPromptText(SAFETY_GATE_PROMPTS[1].file);
+      if (text && text.indexOf(FACT_CHECK_EDIT_LABEL) >= 0) {
+        fc.text = text;
+        await chrome.storage.local.set({ prompts: state.prompts });
+      }
     }
   }
   state.defaultAIId = hasAIProvider(data.defaultAIId) ? data.defaultAIId : (hasAIProvider(data.selectedAI) ? data.selectedAI : 'grok');
@@ -4204,8 +4243,7 @@ function parseGateSiteDomains(text) {
 // job builders (Start and resolveRunConfig) so they can never drift apart.
 // `prompt` is the selected run prompt (its webSearch flag).
 function safetyGateJobFields(prompt) {
-  const fcId = hasFactCheckPrompt(state.factCheckPromptId) ? state.factCheckPromptId : defaultFactCheckPromptId();
-  const fcPrompt = state.prompts.find(p => p.id === fcId && p.type === 'factcheck');
+  const fcPrompt = chosenFactCheckPrompt();
   return {
     gateEnabled: (state.gateEnabled !== 'off'),
     gateLinkCheck: (state.gateLinkCheck !== 'off'),
@@ -4219,6 +4257,20 @@ function safetyGateJobFields(prompt) {
     factCheckOnError: (state.factCheckOnError === 'save' ? 'save' : 'keep'),
     promptWebSearch: !!(prompt && prompt.webSearch)
   };
+}
+
+// The fact-check prompt a job carries (null = none: the background then uses
+// the shipped prompts/fact-check.txt).
+function chosenFactCheckPrompt() {
+  const fcId = hasFactCheckPrompt(state.factCheckPromptId) ? state.factCheckPromptId : defaultFactCheckPromptId();
+  return state.prompts.find(p => p.id === fcId && p.type === 'factcheck') || null;
+}
+// True when that prompt describes the EDITING INSTRUCTIONS block, so the
+// background sends the run prompt with the fact check (an empty or missing
+// prompt = the shipped file, which does).
+function factCheckPromptKnowsBlock(fcPrompt) {
+  const text = fcPrompt ? String(fcPrompt.text || '').trim() : '';
+  return !text || text.indexOf(FACT_CHECK_EDIT_LABEL) >= 0;
 }
 
 // One line for the Start confirm dialog, plus a warning line when the run
@@ -4244,11 +4296,18 @@ function safetyGateSummary(prompt) {
   if (prompt && !gatePrompt) {
     const sgEditor = state.prompts.find(p => p.id === SAFETY_GATE_PROMPTS[0].id && isRunPrompt(p));
     const failClosedFactCheck = state.factCheck !== 'off' && state.factCheckOnError !== 'save';
+    const fcPrompt = chosenFactCheckPrompt();
+    const knowsBlock = factCheckPromptKnowsBlock(fcPrompt);
     let research;
     if (prompt.webSearch) research = 'Web search is allowed for it, so prices, dates and "Last updated" lines are not checked by code.';
-    else if (failClosedFactCheck) research = 'Prices, dates and "Last updated" lines are not checked by code; the AI fact check reviews them. The built-in fact-check prompt reports a lost price and a "Last updated" line it cannot verify as serious problems, so such edits usually end as FACT CHECK BLOCKED (the original stays live).';
+    else if (failClosedFactCheck) research = 'Prices, dates and "Last updated" lines are not checked by code; the AI fact check reviews them.' +
+      (knowsBlock ? ' The fact check also gets this prompt, so the changes it asks for on purpose (removing the kind of content it names, such as prices, a "Last updated" line with today\'s date, a new structure) are accepted. Other lost information, and a new price, spec, rating or "reviewed / checked" claim the fact check cannot verify, still end as FACT CHECK BLOCKED (the original stays live).' : '');
     else research = 'Because the fact check is ' + (state.factCheck === 'off' ? 'OFF' : 'set to save the edit when it breaks') +
-      ', the code still checks prices, dates and "Last updated" lines: an edit that removes or changes a price, percentage or year, or adds a "Last updated" line or today\'s date, is blocked. With the fact check on (keep the original when it breaks) the code leaves these changes to the fact check, but the built-in fact-check prompt usually blocks them too.';
+      ', the code still checks prices, dates and "Last updated" lines: an edit that removes or changes a price, percentage or year, or adds a "Last updated" line or today\'s date, is blocked. With the fact check on (keep the original when it breaks) the code leaves these changes to the fact check' +
+      (knowsBlock ? ', which also gets this prompt and accepts the changes it asks for on purpose.' : '.');
+    if (state.factCheck !== 'off' && !knowsBlock) {
+      research += ' The chosen fact-check prompt "' + ((fcPrompt && fcPrompt.name) || 'Untitled') + '" does not describe the editing-instructions block (an older copy or an own prompt), so this prompt does NOT go with the fact check: a price or section it removes on purpose, or its "Last updated" line, is usually reported and the post ends as FACT CHECK BLOCKED (the original stays live). Paste the text of prompts/fact-check.txt into that fact-check prompt to change this.';
+    }
     warn.push('⚠ The prompt "' + (prompt.name || 'Untitled') + '" was not written for the Safety Gate (it has no <!-- APU-END --> end marker), so the gate uses its structure rules: images, media, tables, links, shortcodes, blocks and lost text are checked, and a cut-off reply is caught only by the older completeness checks. ' +
       research + (sgEditor && sgEditor.id !== prompt.id ? ' The "' + sgEditor.name + '" prompt is made for it.' : ''));
   }

@@ -22,6 +22,8 @@ The row goes to **❌ Failed posts** with the reason.
   If it finds a problem, the AI gets **one** chance to fix it in another new chat.
   The fixed edit goes through the Safety Gate and the fact check again.
   Only an edit that passes is saved.
+  For an older prompt (no end marker) the fact check also gets that prompt, so the removals it names
+  (for example "remove specific price claims") are not reported as problems (section 3, "Affiliate posts").
 - **Web search per prompt.** Each prompt has a new tick box: "🌐 Allow AI web search with this prompt".
 - **New prompt type** "Fact check (2nd AI round)".
 - **Two ready prompts** are added once when you open the panel:
@@ -91,10 +93,33 @@ Click **Load unpacked** and pick the folder that holds `manifest.json`.
   With the fact check **On** and "Keep the original" when it breaks (the recommended setup above),
   removing a price, adding a "Last updated" line or adding a new link to a live page is **not** blocked by code;
   the fact check reads those changes.
-  But the built-in fact-check prompt is strict: it reports a lost price as lost information and a
-  "Last updated" line it cannot verify as an unverified claim, both serious. So such edits usually get a
-  fix round and then end as FACT CHECK BLOCKED (the original stays live, two extra chats were used).
-  If you want these posts updated, use an affiliate prompt that keeps prices and adds no "Last updated" line.
+  The fact check also gets your affiliate prompt (and any PRIORITY FIX note sent with it), in a block called
+  "EDITING INSTRUCTIONS THE EDITOR FOLLOWED". These changes are then accepted:
+  - removing a kind of content the prompt names (the Amazon prompt says "Remove specific price claims",
+    so removed prices are fine);
+  - a "Last updated" line with today's date (or this month and year);
+  - moving, merging or renaming sections, as long as their information stays.
+
+  The fact check still blocks, after its one fix round:
+  - lost facts, figures, steps, warnings or examples that the prompt does not name. General permissions such as
+    "rewrite freely", "shorten", "remove outdated or unnecessary information" or "rewrite claims you can't verify"
+    never excuse a loss, and neither does a PRIORITY FIX note;
+  - a new or changed price, spec, rating or other fact it cannot confirm, even when the prompt asked for it
+    (when web search is off for the prompt, the fact check has no web search either and can confirm almost none);
+  - wording that says facts were checked (such as "Reviewed for accuracy" or "Fact-checked") that it cannot confirm.
+    The built-in Amazon prompt adds "Reviewed for accuracy", so with web search off its edits often get a fix round,
+    and end as FACT CHECK BLOCKED when the fix round keeps that wording;
+  - contradictions inside the edit (also in boxes the prompt asked for), dropped or weakened warnings,
+    lost images, links, products or tables, and invented "I tested" claims.
+
+  Prompts longer than 30,000 characters are shortened in the middle for the fact check (start and end kept).
+  The block is sent only when the fact-check prompt describes it (its text names
+  "EDITING INSTRUCTIONS THE EDITOR FOLLOWED", as `prompts/fact-check.txt` does).
+  If you installed an earlier 3.46.0 build, your "Fact Check (Safety Gate)" prompt has an older text that does not.
+  When you open the panel, a copy you never edited is replaced with the new text by itself.
+  A copy you edited, or your own fact-check prompt, is kept: then your affiliate prompt is **not** sent with the
+  fact check, removed prices are usually reported, and the Start box and the log say so.
+  Paste the text of `prompts/fact-check.txt` into that prompt to change this.
   With the fact check **Off**, or set to "Save the edit anyway", nothing else would stop a made-up price,
   so the code keeps its price and date rules: such an edit is then **blocked** (when web search is off for the prompt).
   Lost images, tables, links, shortcodes, blocks or text are always blocked.
@@ -152,6 +177,7 @@ The log says which rule set was used, on a line with "🛡 Gate rules".
 **Why.** Older affiliate prompts change prices and dates on purpose (for example the Amazon prompt removes prices
 and adds a "Last updated" line). With the strict no-research rules almost every such post would fail.
 So the code leaves these changes to the AI fact check, but only while that fact check keeps the original when it breaks.
+The fact check gets the prompt and accepts the removals it names (section 3, "Affiliate posts").
 Without such a fact check nothing else would catch a made-up price, so the code keeps checking.
 The log line "🛡 Gate rules" says "structure rules" or "structure rules + research rules".
 
@@ -292,9 +318,9 @@ The message looks like: `SAFETY GATE BLOCKED: IMG_COUNT, LINK_MISSING — ... Th
 | LAST_CHECKED_WITHOUT_RESEARCH | Web search is off for the prompt, but the AI added a "Last checked" / "updated" line or today's date. | Retry new. |
 
 For older prompts these three codes appear only when the fact check is Off or set to "Save the edit anyway" (section 4.1).
-If your affiliate prompt removes prices or adds a "Last updated" line on purpose, switching the fact check On
-with "Keep the original" stops these three codes, but the built-in fact check usually blocks such edits too
-(section 3, "Affiliate posts").
+If your affiliate prompt removes prices or adds a "Last updated" line on purpose, switch the fact check On
+with "Keep the original": these three codes stop, and the fact check, which also gets your prompt, accepts the
+removals the prompt names and a "Last updated" line with today's date (section 3, "Affiliate posts").
 
 **Rare technical codes**
 
@@ -400,8 +426,12 @@ is still blocked, even when it ends with the marker.)
 - **PROMPT_ECHO does not read HTML comments.** A note copied into a `<!-- comment -->` is not shown on the page
   and is not blocked.
 - **Older affiliate prompts with the fact check On:** the code leaves prices and "Last updated" lines to the fact
-  check, and the built-in fact-check prompt usually blocks such changes (section 3). The tests use a fake
-  fact check that always passes, so this was not tested with the real ChatGPT.
+  check. The fact check gets the prompt and accepts the removals it names, but it still blocks other lost facts
+  and new facts it cannot confirm (section 3). The tests use a fake fact check that follows these rules; whether
+  the real ChatGPT follows them was not tested.
+- **A reply read back from an older chat** ("↻ Retry AI session", "↻ Recover any code", HTML recovery):
+  the prompt that chat got is not stored, so its fact check gets the prompt selected now,
+  or no editing instructions when a Safety Gate prompt is selected now.
 - **The editor prompt is long** (about 58,000 characters). With a very long article the reply may not fit.
   Then END_MARKER_MISSING blocks the post (safe, but not updated).
 - **The reference original** is the earliest backup of this run (the extension keeps the last 300 backups).

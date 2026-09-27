@@ -160,11 +160,14 @@ function todayYmd() {
   return t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') + '-' + String(t.getDate()).padStart(2, '0');
 }
 const LEGACY_ORIGINAL = article({ seasonExtra: PRICE_SENTENCE });
-// opts: { dropImage2 }
+// S29: the legacy edit ALSO invents a price that is in neither the original
+// nor the prompt (the prompt even says to remove price claims).
+const INVENTED_PRICE_SENTENCE = ' A matching cast iron lid sells for $19.99 on Amazon.';
+// opts: { dropImage2, inventedPrice }
 function legacyEdit(opts) {
   return article({
     edited: true,
-    seasonExtra: PRICE_SENTENCE_EDITED,
+    seasonExtra: PRICE_SENTENCE_EDITED + ((opts && opts.inventedPrice) ? INVENTED_PRICE_SENTENCE : ''),
     afterIntro: para('<em>Last updated: ' + todayYmd() + '</em>'),
     whyExtra: LIVE_LINK_SENTENCE,
     dropImage2: !!(opts && opts.dropImage2)
@@ -310,10 +313,91 @@ const SCENARIOS = {
 };
 
 // S16 / S17: legacy affiliate prompt (see legacyEdit).
+// The fake fact check of S16 / S29 follows the shipped fact-check prompt's
+// INTENDED CHANGES rule: the removed price is intended ONLY when the payload
+// carries the EDITING INSTRUCTIONS block with the prompt that asks for it
+// (the built-in Amazon prompt: "Remove specific price claims"). Without the
+// block it reports the lost price (HIGH info_lost), as the real prompt would.
+const EDIT_BLOCK_LABEL = 'EDITING INSTRUCTIONS THE EDITOR FOLLOWED';
+function editingBlock(payload) {
+  const s = String(payload || '');
+  const a = s.indexOf(EDIT_BLOCK_LABEL + ' START');
+  const z = s.indexOf(EDIT_BLOCK_LABEL + ' END');
+  if (a < 0 || z < a) return null;
+  return s.slice(s.indexOf('\n', a) + 1, s.lastIndexOf('\n', z)).trim();
+}
+// The EDITED block of a fact-check payload.
+function editedBlock(payload) {
+  const s = String(payload || '');
+  const a = s.indexOf('EDITED ARTICLE HTML START');
+  const z = s.indexOf('EDITED ARTICLE HTML END');
+  return (a < 0 || z < a) ? '' : s.slice(a, z);
+}
+const PRICE_LOST_ISSUE = {
+  severity: 'high',
+  category: 'info_lost',
+  quote: 'A pre-seasoned 10-inch skillet is sold at most kitchen shops for little money',
+  problem: 'The original says a pre-seasoned 10-inch skillet costs about $25; the edit dropped the price.',
+  fix: 'Keep the original wording: "costs about $25 at most kitchen shops".'
+};
+const INVENTED_PRICE_ISSUE = {
+  severity: 'high',
+  category: 'new_claim_unverified',
+  quote: 'A matching cast iron lid sells for $19.99 on Amazon',
+  problem: 'The edit adds a price that is not in the original and could not be verified (no web search).',
+  fix: 'Remove the added claim about the lid price.'
+};
+function legacyFactCheck(ctx) {
+  const block = editingBlock(ctx.payload);
+  if (!block || block.indexOf('Remove specific price claims') < 0) return jsonReply({ verdict: 'fix', issues: [PRICE_LOST_ISSUE] });
+  if (editedBlock(ctx.payload).indexOf('$19.99') >= 0) return jsonReply({ verdict: 'fix', issues: [INVENTED_PRICE_ISSUE] });
+  return jsonReply(PASS);
+}
 SCENARIOS.S16 = {
   title: 'legacy prompt: price removed, Last updated, new link',
   editor: () => amazonReply(legacyEdit()),
-  factCheck: () => jsonReply(PASS)
+  factCheck: legacyFactCheck
+};
+// S29: the same legacy edit, but it ALSO invents a new price → the fact check
+// (which accepts the intended removal) reports the invented one → fix round →
+// the second editor reply has no invented price → saved.
+SCENARIOS.S29 = {
+  title: 'legacy prompt: intended price removal + invented price -> fix round',
+  editor: (ctx) => hasPriorityFixBlock(ctx.payload)
+    ? amazonReply(legacyEdit())
+    : amazonReply(legacyEdit({ inventedPrice: true })),
+  factCheck: legacyFactCheck
+};
+// S30: a Safety Gate prompt: the fact-check payload must NOT carry the
+// EDITING INSTRUCTIONS block (first check and after the fix round). With the
+// block the fake fact check answers without JSON (FACT CHECK ERROR, nothing
+// saved), so a leak cannot pass unnoticed.
+SCENARIOS.S30 = {
+  title: 'Safety Gate prompt: no editing instructions in the fact check',
+  editor: (ctx) => hasPriorityFixBlock(ctx.payload)
+    ? editorReply(GOOD_EDIT)
+    : editorReply(article({ edited: true, cleanExtra: ' ' + BAD_CLAIM })),
+  factCheck: (ctx) => {
+    // (The fact-check prompt itself names the block; only its banner counts.)
+    if (/EDITING INSTRUCTIONS THE EDITOR FOLLOWED (?:START|END)/.test(ctx.payload)) return 'This payload carries an editing-instructions block, which a Safety Gate prompt must never send.';
+    return ctx.payload.indexOf(BAD_CLAIM) >= 0 ? jsonReply({ verdict: 'fix', issues: [BAD_CLAIM_ISSUE] }) : jsonReply(PASS);
+  }
+};
+// S31 / S32: the stored "Fact Check (Safety Gate)" prompt is the text of an
+// earlier 3.46.0 pre-release build (it does not describe the EDITING
+// INSTRUCTIONS block). S31: never edited → the panel replaces it with the
+// shipped text on load → S16's result. S32: edited → kept → the block is NOT
+// sent → the fake fact check reports the removed price (as the real old
+// prompt would) → fix round → same edit → FACT CHECK BLOCKED.
+SCENARIOS.S31 = {
+  title: 'pre-release fact-check prompt (unedited) is upgraded -> legacy edit saved',
+  editor: () => amazonReply(legacyEdit()),
+  factCheck: legacyFactCheck
+};
+SCENARIOS.S32 = {
+  title: 'edited pre-release fact-check prompt: no editing instructions -> FACT CHECK BLOCKED',
+  editor: () => amazonReply(legacyEdit()),
+  factCheck: legacyFactCheck
 };
 SCENARIOS.S17 = {
   title: 'legacy prompt: AI drops an image',
@@ -950,6 +1034,7 @@ module.exports = {
   startServer, SCENARIOS, classifyPayload, hasPriorityFixBlock, article, legacyEdit, todayYmd,
   ORIGINAL_HTML, GOOD_EDIT, BAD_CLAIM, LIVE_LINK, DEAD_LINK, END, LEGACY_ORIGINAL, SPANS_ORIGINAL, PRICE_SENTENCE,
   CUT_ORIGINAL, CUT_GOOD, CUT_REPLY, ECHO_SENTENCE, BAD_CLAIM_ISSUE,
+  EDIT_BLOCK_LABEL, editingBlock, INVENTED_PRICE_SENTENCE, PRICE_LOST_ISSUE, INVENTED_PRICE_ISSUE,
   T_ORIGINAL, T_CUT, RENAMED_GOOD, F_ORIGINAL, F_GOOD, F_CUT, renameLastHeading, cutBeforeLastHeading,
   WP_HOST, LINK_HOST, WP_USER, WP_APP_PASSWORD
 };

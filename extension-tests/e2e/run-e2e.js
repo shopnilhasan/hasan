@@ -43,7 +43,10 @@
 //   S15 update mode "editor": AI drops an image → the editor is never touched
 //   S16 legacy prompt (built-in "Single Amazon Product": no end marker, web
 //       search off): the edit removes a price, adds "Last updated: <today>" and
-//       a new deep link to a live page → saved (structure rules only, link kept)
+//       a new deep link to a live page → saved (structure rules only, link kept).
+//       The fake fact check accepts the removed price ONLY when the payload
+//       carries the EDITING INSTRUCTIONS block with that prompt (else HIGH
+//       info_lost → fix round)
 //   S17 same legacy prompt, the edit drops an image → still blocked (IMG_COUNT)
 //   S18 first reply drops an image → blocked; the end-of-batch retry's payload
 //       carries a PRIORITY FIX note naming IMG_COUNT → good edit saved once
@@ -70,6 +73,18 @@
 //       at the end (the verifier's S97) → saved
 //   S28 FAQ-last post: the reply drops the last question and answer, marker
 //       at the end (the verifier's S98) → not saved
+//   S29 = S16's legacy edit that ALSO invents a new price → the fact check
+//       (intended removal accepted) reports it HIGH new_claim_unverified → fix
+//       round (its fact check gets the prompt + PRIORITY FIX note) → saved
+//       without the invented price
+//   S30 Safety Gate prompt: neither fact check (first edit, fix round) carries
+//       an EDITING INSTRUCTIONS block → saved after the fix round
+//   S31 = S16 with the stored "Fact Check (Safety Gate)" prompt set to the
+//       unedited text of an earlier 3.46.0 pre-release build → the panel
+//       replaces it with the shipped text → block sent → saved
+//   S32 = S16 with an EDITED copy of that pre-release text → kept → no block
+//       (the log and the Start dialog warn) → removed price reported → fix
+//       round → FACT CHECK BLOCKED, nothing saved
 //
 // Usage:
 //   node extension-tests/e2e/run-e2e.js [--only S1,S4] [--skip S9] [--jobs 3]
@@ -146,6 +161,22 @@ function bannerSection(payload, label) {
   const from = s.indexOf('\n', a);
   const to = s.lastIndexOf('\n', z);
   return s.slice(from + 1, to).trim();
+}
+// The text after the "══  INSTRUCTIONS  ══" banner line (editor payload: the
+// prompt as sent, plus its PRIORITY FIX note; fact-check payload: the
+// fact-check prompt).
+function instructionsOf(payload) {
+  const s = String(payload || '');
+  const m = /\u2550+  INSTRUCTIONS  \u2550+\n/.exec(s);
+  return m ? s.slice(m.index + m[0].length).trim() : null;
+}
+const EDIT_BLOCK = S.EDIT_BLOCK_LABEL;
+// The "Fact Check (Safety Gate)" text the earlier 3.46.0 pre-release builds seeded.
+const PRE_RELEASE_FACT_PROMPT = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'fact-check-3.46.0-prerelease.txt'), 'utf8').trim();
+const SHIPPED_FACT_PROMPT = fs.readFileSync(path.join(EXT_DIR, 'prompts', 'fact-check.txt'), 'utf8').trim();
+// The seeded prompt list with the "Fact Check (Safety Gate)" text replaced (sc.prompts hook).
+function withFactCheckText(prompts, text) {
+  return prompts.map((p) => (p.id === 'p_sg_factcheck' ? Object.assign({}, p, { text }) : p));
 }
 // Where two strings first differ (for readable assertion messages).
 function firstDiff(a, b) {
@@ -469,11 +500,10 @@ const SCENARIOS = [
     // Amazon Product" prompt: no <!-- APU-END -->, web search off) gets the
     // gate's structure rules only: a removed price, a "Last updated" line with
     // today's date and a new deep link are not blocked, and the new link is
-    // still link-checked (alive → kept). NOTE: the fake fact check always
-    // answers "pass". The real built-in fact-check prompt would most likely
-    // flag the lost price and the unverified "Last updated" line (high), so
-    // this scenario tests the CODE path only; the Start dialog and
-    // SAFETY-GATE.md warn that such edits usually end as FACT CHECK BLOCKED.
+    // still link-checked (alive → kept). The fact check gets the prompt in an
+    // EDITING INSTRUCTIONS block; the fake fact check (server.js
+    // legacyFactCheck) passes the removed price ONLY with that block, else it
+    // reports a HIGH info_lost issue (→ a fix round, a second editor chat).
     id: 'S16', title: S.SCENARIOS.S16.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
     check(c, t) {
       const expected = S.legacyEdit();
@@ -497,7 +527,19 @@ const SCENARIOS = [
       t.notLog(c, /Removed link/, 'log: no link was removed');
       t.log(c, /Safety Gate PASSED/, 'log: Safety Gate PASSED');
       t.ok(/structure rules/.test(c.confirmText), 'Start confirm dialog explains the structure rules', c.confirmText);
-      t.ok(/usually end as FACT CHECK BLOCKED/.test(c.confirmText), 'Start confirm dialog warns that the built-in fact check usually blocks such edits', c.confirmText);
+      t.ok(/The fact check also gets this prompt, so the changes it asks for on purpose .* are accepted\. Other lost information, and a new price, spec, rating or "reviewed \/ checked" claim the fact check cannot verify, still end as FACT CHECK BLOCKED/.test(c.confirmText), 'Start confirm dialog: the fact check gets the prompt; other losses and new unverifiable claims are still blocked', c.confirmText);
+      t.eq(c.factChats.length, 1, 'one fact-check chat (no fix round)');
+      const fp = c.factChats[0] ? c.factChats[0].payload : '';
+      const block = bannerSection(fp, EDIT_BLOCK);
+      t.ok(block !== null, 'fact-check payload carries the EDITING INSTRUCTIONS block');
+      t.same(block, instructionsOf(ep), 'the block = the prompt exactly as the editor chat got it');
+      t.ok(block && block.indexOf('Remove specific price claims') >= 0, 'the block holds the Amazon prompt (it asks to remove prices)');
+      t.ok(block && !S.hasPriorityFixBlock(block), 'no PRIORITY FIX note in the block (none was sent)');
+      const order = ['ORIGINAL ARTICLE HTML START', 'EDITED ARTICLE HTML END', EDIT_BLOCK + ' START', EDIT_BLOCK + ' END', '  INSTRUCTIONS  '].map((l) => fp.indexOf(l));
+      t.ok(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1])), 'payload order: articles, EDITING INSTRUCTIONS, then the fact-check instructions', JSON.stringify(order));
+      t.ok((instructionsOf(fp) || '').indexOf('INTENDED CHANGES') >= 0, 'the fact-check prompt has the INTENDED CHANGES rule');
+      t.ok(c.factChats[0] && /"verdict": "pass"/.test(c.factChats[0].reply), 'the fake fact check passed (it saw the block)');
+      t.log(c, /Fact check: the edit came from a prompt that is not a Safety Gate prompt — its editing instructions \(\d+ chars\) go with it/, 'log: the editing instructions go with the fact check');
       t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
     }
   },
@@ -760,6 +802,113 @@ const SCENARIOS = [
     }
   },
   {
+    // S16's legacy edit, but it ALSO invents a new price. The fact check
+    // accepts the removal the prompt asks for and reports the invented price
+    // (HIGH new_claim_unverified, exact quote) → fix round in a new chat → the
+    // second reply has no invented price → second fact check (its block now
+    // also carries the PRIORITY FIX note) → pass → saved once.
+    id: 'S29', title: S.SCENARIOS.S29.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
+    check(c, t) {
+      const expected = S.legacyEdit();
+      t.ok(S.legacyEdit({ inventedPrice: true }).indexOf('$19.99') >= 0 && S.LEGACY_ORIGINAL.indexOf('$19.99') < 0, 'the first edit invents a price the original does not have');
+      t.eq(c.editorChats.length, 2, 'two editor chats (first edit + fix round)');
+      t.eq(c.factChats.length, 2, 'two fact-check chats');
+      const [e1, e2] = c.editorChats;
+      const [f1, f2] = c.factChats;
+      t.ok(e1 && e2 && e1.conversationId !== e2.conversationId, 'the fix round used a NEW chat');
+      t.ok(f1 && /"verdict": "fix"/.test(f1.reply) && /new_claim_unverified/.test(f1.reply), 'first fact check: fix, new_claim_unverified (not info_lost)', f1 && f1.reply);
+      t.ok(f1 && !/info_lost/.test(f1.reply), 'first fact check did not report the intended price removal');
+      const b1 = f1 ? bannerSection(f1.payload, EDIT_BLOCK) : null;
+      t.same(b1, instructionsOf(e1 && e1.payload), 'first block = the prompt the first editor chat got');
+      t.ok(b1 && !S.hasPriorityFixBlock(b1), 'first block: no PRIORITY FIX note');
+      t.ok(e2 && S.hasPriorityFixBlock(e2.payload) && e2.payload.indexOf('A matching cast iron lid sells for $19.99 on Amazon') >= 0, 'fix-round payload: PRIORITY FIX note quotes the invented price');
+      t.same(e2 && bannerSection(e2.payload, 'ARTICLE HTML'), S.LEGACY_ORIGINAL.trim(), 'fix round regenerates from the ORIGINAL article');
+      const b2 = f2 ? bannerSection(f2.payload, EDIT_BLOCK) : null;
+      t.same(b2, instructionsOf(e2 && e2.payload), 'second block = the prompt + PRIORITY FIX note the fix-round chat got');
+      t.ok(b2 && S.hasPriorityFixBlock(b2) && b2.indexOf('A fact-check of your previous edit') >= 0, 'second block carries the PRIORITY FIX note');
+      t.same(f2 && bannerSection(f2.payload, 'EDITED ARTICLE HTML'), expected.trim(), 'second fact check saw the fix-round edit');
+      t.ok(f2 && /"verdict": "pass"/.test(f2.reply), 'second fact check passed');
+      t.eq(c.writes.length, 1, 'exactly one WordPress write (after the fix round)');
+      const saved = c.writes[0] ? c.writes[0].content : '';
+      t.same(saved, expected.trim(), 'saved content = the fix-round edit');
+      t.ok(saved.indexOf('$19.99') < 0 && saved.indexOf('$25') < 0, 'neither the invented nor the removed price is saved');
+      t.row(c, 'updated');
+      t.ok(c.row && c.row.factCheck && c.row.factCheck.verdict === 'pass' && c.row.factCheck.fixRound === true, 'row.factCheck = pass after the fix round');
+      t.log(c, /its editing instructions \(\d+ chars, with the PRIORITY FIX note\) go with it/, 'log: the fix round\'s fact check got the prompt + PRIORITY FIX note');
+      t.log(c, /Fact check PASSED \(verdict "pass", after one fix round\)/, 'log: Fact check PASSED after one fix round');
+      t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
+    // A Safety Gate prompt never sends the EDITING INSTRUCTIONS block: not
+    // with the first fact check and not after the fix round (the fake fact
+    // check answers without JSON if it sees one → nothing would be saved).
+    id: 'S30', title: S.SCENARIOS.S30.title, prompt: 'p_sg_editor',
+    check(c, t) {
+      t.eq(c.factChats.length, 2, 'two fact-check chats (first edit + fix round)');
+      c.factChats.forEach((f, i) => {
+        t.ok(f.payload.indexOf(EDIT_BLOCK + ' START') < 0 && f.payload.indexOf(EDIT_BLOCK + ' END') < 0, 'fact check ' + (i + 1) + ': no EDITING INSTRUCTIONS block');
+        t.ok(/EDITED ARTICLE HTML END  \u2550+\s+\u2550+  INSTRUCTIONS  \u2550+/.test(f.payload), 'fact check ' + (i + 1) + ': the instructions follow the edited article directly');
+      });
+      t.eq(c.editorChats.length, 2, 'two editor chats (first edit + fix round)');
+      t.ok(c.editorChats[1] && S.hasPriorityFixBlock(c.editorChats[1].payload), 'the fix round carried a PRIORITY FIX note');
+      t.eq(c.writes.length, 1, 'exactly one WordPress write');
+      t.same(c.writes[0] ? c.writes[0].content : '', S.GOOD_EDIT.trim(), 'saved content = the fix-round edit');
+      t.row(c, 'updated');
+      t.notLog(c, /its editing instructions/, 'log: no editing instructions sent');
+      t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
+    // The stored "Fact Check (Safety Gate)" prompt is the unedited text of an
+    // earlier 3.46.0 pre-release build (seeding ran then and never again).
+    // The panel replaces it with the shipped text on load, so S16's edit gets
+    // the EDITING INSTRUCTIONS block and is saved.
+    id: 'S31', title: S.SCENARIOS.S31.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
+    prompts: (ps) => withFactCheckText(ps, PRE_RELEASE_FACT_PROMPT),
+    check(c, t) {
+      t.ok(PRE_RELEASE_FACT_PROMPT.indexOf(EDIT_BLOCK) < 0, 'the pre-release text does not describe the block');
+      t.eq(c.factChats.length, 1, 'one fact-check chat');
+      const fp = c.factChats[0] ? c.factChats[0].payload : '';
+      t.same(instructionsOf(fp), SHIPPED_FACT_PROMPT.replace(/\[\[TODAY\]\]/g, localDateYmd()).replace(/\[\[WEB_SEARCH\]\]/g, 'no'), 'the fact check used the SHIPPED prompt text (upgraded on load)');
+      const block = bannerSection(fp, EDIT_BLOCK);
+      t.ok(block !== null && block.indexOf('Remove specific price claims') >= 0, 'the fact-check payload carries the EDITING INSTRUCTIONS block');
+      t.eq(c.writes.length, 1, 'exactly one WordPress write');
+      t.same(c.writes[0] ? c.writes[0].content : '', S.legacyEdit().trim(), 'saved content = the legacy edit');
+      t.row(c, 'updated');
+      t.ok(/The fact check also gets this prompt/.test(c.confirmText), 'Start confirm dialog: the fact check gets the prompt', c.confirmText);
+      t.ok(!/does not describe the editing-instructions block/.test(c.confirmText), 'Start confirm dialog: no older-prompt warning');
+      t.notLog(c, /does not describe the EDITING INSTRUCTIONS THE EDITOR FOLLOWED block/, 'log: no older-prompt warning');
+      t.ok(c.storedFactPrompt === SHIPPED_FACT_PROMPT, 'storage: the seeded fact-check prompt now holds the shipped text', JSON.stringify({ pre: c.storedFactPrompt === PRE_RELEASE_FACT_PROMPT }));
+    }
+  },
+  {
+    // An EDITED copy of the pre-release text is kept. It does not describe the
+    // block, so the block is NOT sent (the log and the Start dialog say so);
+    // the fake fact check then reports the removed price like the old prompt
+    // → fix round → same edit → FACT CHECK BLOCKED. Nothing is saved.
+    id: 'S32', title: S.SCENARIOS.S32.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
+    prompts: (ps) => withFactCheckText(ps, PRE_RELEASE_FACT_PROMPT + '\nOwn rule: be brief.'),
+    check(c, t) {
+      t.eq(c.factChats.length, 2, 'two fact-check chats (first edit + fix round)');
+      c.factChats.forEach((f, i) => {
+        t.ok(f.payload.indexOf(EDIT_BLOCK + ' START') < 0 && f.payload.indexOf(EDIT_BLOCK + ' END') < 0, 'fact check ' + (i + 1) + ': no EDITING INSTRUCTIONS block');
+        t.ok((instructionsOf(f.payload) || '').indexOf('Own rule: be brief.') >= 0, 'fact check ' + (i + 1) + ': the edited prompt was used');
+        t.ok(/info_lost/.test(f.reply), 'fact check ' + (i + 1) + ': the removed price is reported');
+      });
+      t.eq(c.editorChats.length, 2, 'two editor chats (first edit + fix round)');
+      t.eq(c.writes.length, 0, 'NO WordPress write');
+      t.same(c.post.content, S.LEGACY_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/^FACT CHECK BLOCKED: /.test(c.row && c.row.message || ''), 'row message starts with FACT CHECK BLOCKED', c.row && c.row.message);
+      t.log(c, /the chosen fact-check prompt does not describe the EDITING INSTRUCTIONS THE EDITOR FOLLOWED block/, 'log: warns that the fact-check prompt is an older copy');
+      t.notLog(c, /its editing instructions/, 'log: no editing instructions sent');
+      t.ok(/The chosen fact-check prompt "Fact Check \(Safety Gate\)" does not describe the editing-instructions block/.test(c.confirmText), 'Start confirm dialog warns about the older fact-check prompt', c.confirmText);
+      t.ok(!/The fact check also gets this prompt/.test(c.confirmText), 'Start confirm dialog does not claim the prompt goes with the fact check');
+      t.ok(c.storedFactPrompt === PRE_RELEASE_FACT_PROMPT + '\nOwn rule: be brief.', 'storage: the edited copy is kept', JSON.stringify({ own: String(c.storedFactPrompt).indexOf('Own rule') >= 0, shipped: c.storedFactPrompt === SHIPPED_FACT_PROMPT, pre: c.storedFactPrompt === PRE_RELEASE_FACT_PROMPT }));
+    }
+  },
+  {
     // Same AI replies as S2, but the browser profile has NOT allowed clipboard
     // access on the chat site (a fresh Chrome profile). The edit is < 98% of
     // the source, so waitForAIResponse's preferCopyIfLonger clicks the code
@@ -925,6 +1074,15 @@ async function runScenario(sc, env) {
       factCheckPromptId: 'p_sg_factcheck',
       factCheckOnError: 'keep'
     }, sc.storage || {}, OPTS.set);
+    // Optional per-scenario change of the stored prompts (before the reload, like an older install).
+    // Any other panel page (the one the extension opens on install) is closed
+    // first: an open panel saves its own copy of the prompts over ours.
+    if (typeof sc.prompts === 'function') {
+      settings.prompts = sc.prompts(prompts.map((p) => Object.assign({}, p)));
+      for (const pg of ctx.pages()) {
+        if (pg !== panel && /^chrome-extension:\/\/[^/]+\/panel\.html/.test(pg.url())) await pg.close();
+      }
+    }
     await panel.evaluate((s) => chrome.storage.local.set(s), settings);
     await panel.reload();
     await panel.waitForSelector('#startBtn', { timeout: 20000 });
@@ -995,6 +1153,12 @@ async function runScenario(sc, env) {
       await waitForBatch(followUpAt, 'the follow-up batch');
     }
     c.statusText = status && status.statusText;
+    // The stored "Fact Check (Safety Gate)" text after the run (S31 / S32).
+    try {
+      const fcStore = await panel.evaluate(() => chrome.storage.local.get('prompts'));
+      const fcp = ((fcStore && fcStore.prompts) || []).find((p) => p && p.id === 'p_sg_factcheck');
+      c.storedFactPrompt = fcp ? String(fcp.text || '') : null;
+    } catch (e) { c.storedFactPrompt = null; }
     // Every AI tab (edit, fact-check, fix round) must be closed by now.
     await sleep(1000);
     c.leftoverChatTabs = ctx.pages().map((p) => p.url()).filter((u) => u.indexOf(chatOrigin) === 0);

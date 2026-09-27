@@ -11,6 +11,8 @@
 //   • Safety Gate settings persist across reloads
 //   • a failed attempt with a SAFETY GATE BLOCKED / FACT CHECK message renders
 //     gate badges in the Failed box
+//   • an unedited pre-release copy of the seeded fact-check prompt is replaced
+//     by the shipped text; an edited copy is kept and the Start text warns
 //
 // Run:  cd extension-tests && npm run smoke   (or: node --test smoke.test.js)
 // Uses a throw-away browser profile in the OS temp dir; nothing is installed.
@@ -30,6 +32,8 @@ const FACT_PROMPT = fs.readFileSync(path.join(EXT_DIR, 'prompts', 'fact-check.tx
 const MANIFEST = JSON.parse(fs.readFileSync(path.join(EXT_DIR, 'manifest.json'), 'utf8'));
 const GATE_KEYS = ['gateEnabled', 'gateLinkCheck', 'gateNewFaq', 'gateSiteDomains', 'factCheck', 'factCheckAiId', 'factCheckPromptId', 'factCheckOnError'];
 const SEEDED = { editor: 'p_sg_editor', factcheck: 'p_sg_factcheck' };
+// The "Fact Check (Safety Gate)" text the earlier 3.46.0 pre-release builds seeded.
+const PRE_RELEASE_FACT_PROMPT = fs.readFileSync(path.join(__dirname, 'fixtures', 'fact-check-3.46.0-prerelease.txt'), 'utf8');
 
 const PW = loadPlaywright();
 
@@ -304,6 +308,40 @@ describe('extension smoke (headless Chromium, real extension/ folder)', { skip: 
       for (const s of ['gate-post', 'fact-post', 'fact-error-post']) assert.ok(!text.includes(s), s + ' also listed in #' + id);
     }
     await page.close();
+  });
+
+  test('an unedited pre-release copy of the seeded fact-check prompt is upgraded on load; an edited copy is kept and the Start text warns', async () => {
+    await closePanels();
+    const st0 = await storage();
+    assert.ok(st0.prompts.some((p) => p.id === SEEDED.factcheck));
+    const withFactText = (text) => st0.prompts.map((p) => (p.id === SEEDED.factcheck ? Object.assign({}, p, { text }) : p));
+    const legacy = { id: 'x_legacy', name: 'Amazon test prompt', text: 'Remove specific price claims.', webSearch: false };
+    const summary = (page) => page.evaluate((pr) => safetyGateSummary(pr), legacy);
+    await setStorage({ prompts: withFactText(PRE_RELEASE_FACT_PROMPT.trim()), gateEnabled: 'on', factCheck: 'on', factCheckPromptId: SEEDED.factcheck, factCheckOnError: 'keep' });
+    let page = await openPanel();
+    let st = await storage();
+    let fact = st.prompts.filter((p) => p.id === SEEDED.factcheck);
+    assert.equal(fact.length, 1);
+    assert.equal(fact[0].text, FACT_PROMPT.trim(), 'the unedited pre-release text is replaced by the shipped one');
+    assert.deepEqual({ type: fact[0].type, name: fact[0].name, webSearch: fact[0].webSearch }, { type: 'factcheck', name: 'Fact Check (Safety Gate)', webSearch: false });
+    assert.deepEqual(st.prompts.map((p) => p.id), st0.prompts.map((p) => p.id), 'no prompt added or removed');
+    st.prompts.filter((p) => p.id !== SEEDED.factcheck).forEach((p) => assert.deepEqual(p, st0.prompts.find((q) => q.id === p.id)));
+    assert.match(await summary(page), /The fact check also gets this prompt, so the changes it asks for on purpose/);
+    assert.doesNotMatch(await summary(page), /does not describe the editing-instructions block/);
+    await page.close();
+    // an edited copy (and an own fact-check prompt) is kept; the Start text says the prompt does not go with the fact check
+    const edited = PRE_RELEASE_FACT_PROMPT.trim() + '\nMy own extra rule.';
+    await closePanels();
+    await setStorage({ prompts: withFactText(edited) });
+    page = await openPanel();
+    st = await storage('prompts');
+    assert.equal(st.prompts.find((p) => p.id === SEEDED.factcheck).text, edited, 'an edited copy is never replaced');
+    const warned = await summary(page);
+    assert.match(warned, /The chosen fact-check prompt "Fact Check \(Safety Gate\)" does not describe the editing-instructions block/);
+    assert.doesNotMatch(warned, /The fact check also gets this prompt/);
+    await page.close();
+    await closePanels();
+    await setStorage({ prompts: st0.prompts });
   });
 
   test('no console errors and no page errors on any panel load', () => {
