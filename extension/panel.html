@@ -1185,7 +1185,7 @@ https://yoursite.com/some-other-post/"></textarea>
         <label class="nogrow" style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;margin:0;">
           <input type="checkbox" id="promptWebSearch" style="width:auto;margin:0;"> 🌐 Allow AI web search with this prompt
         </label>
-        <small style="flex:1;min-width:200px;color:var(--text-faint);">On: the AI may use normal web search while it edits (deep research and agent modes are still switched off). Off: web search is switched off. A fact-check prompt uses the setting of the prompt you run.</small>
+        <small style="flex:1;min-width:200px;color:var(--text-faint);">On: the AI may use normal web search while it edits (deep research and agent modes are still switched off); the Safety Gate allows new figures and deep links (dead links are still removed), and the fact check verifies them. Off: web search is switched off, and the Safety Gate blocks any new or removed price, percentage or year and any new "Last checked" or "updated" line, and removes new deep links. Turn it on for prompts that tell the AI to research. A fact-check prompt uses the setting of the prompt you run.</small>
       </div>
       <label style="margin-top:10px;">Prompt text</label>
       <textarea id="promptText" style="min-height:130px;" placeholder="Your full prompt here..."></textarea>

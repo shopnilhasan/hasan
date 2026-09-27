@@ -998,6 +998,24 @@ test('MARKDOWN: markdown and search-tool citation marks are not published; code 
   assert.equal(validate(insertBeforeSnippet(GOOD, para('Type <code>**bold**</code> in a markdown editor to get bold text today.'))).pass, true);
 });
 
+test('MARKDOWN: ChatGPT web-search citation tokens (private-use delimiters or bare "citeturn0search3") are not published', () => {
+  const PU = function (cp) { return String.fromCodePoint(cp); };
+  const cases = ['Pressure drops in winter.' + PU(0xe200) + 'cite' + PU(0xe202) + 'turn0search3' + PU(0xe202) + 'turn1news12' + PU(0xe201),
+    'Pressure drops in winter.citeturn0search3', 'Pressure drops in winter. citeturn0search3turn0news5',
+    'Pressure drops in winter (turn2view0).', 'See the manual. fileciteturn0file1'];
+  for (const c of cases) {
+    const r = validate(insertBeforeSnippet(GOOD, para(c)));
+    expectError(r, 'MARKDOWN');
+    assert.ok(r.errors.some(function (e) { return /chat citation token/.test(e.message); }), c);
+  }
+  // normal words are not citation tokens
+  assert.equal(validate(insertBeforeSnippet(GOOD, para('Turn the valve cap 3 times, then return to search results and turn 0 into 1 on the gauge.'))).pass, true);
+  // a token already in the original is not counted again
+  const withToken = insertBeforeSnippet(ORIG, para('Old note citeturn0search3 left by an earlier edit of this page.'));
+  assert.equal(V.validateArticle(withToken, insertBeforeSnippet(GOOD, para('Old note citeturn0search3 left by an earlier edit of this page.')), OPTS).errors
+    .some(function (e) { return e.code === 'MARKDOWN'; }), false);
+});
+
 test('sanitizeLinks: tracking parameters (utm_source=openai, gclid...) are removed from new links only', async () => {
   const e = sEdited('See <a href="https://www.who.int/news/item/1?utm_source=openai&amp;id=7">WHO</a> and <a href="https://www.cdc.gov/?gclid=x">CDC</a>.');
   const r = V.sanitizeLinks(S_ORIG, e, {});
@@ -1109,6 +1127,12 @@ test('filterAuditIssues: lightly paraphrased quotes and quotes with citation mar
   r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', quote: 'Most passenger car tyres should be replaced after six years, whatever the tread depth. [1]' }] });
   assert.equal(r.issues.length, 1);
   r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', quote: 'passenger car tyres should be replaced after six years 【1†source】' }] });
+  assert.equal(r.issues.length, 1);
+  // ChatGPT citation tokens in the quote (both forms)
+  r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', quote: 'replaced after six years, whatever citeturn0search3 turn0news1 turn1view2' }] });
+  assert.equal(r.issues.length, 1);
+  r = V.filterAuditIssues(art, { verdict: 'fix', issues: [{ severity: 'high', quote: 'replaced after six years, whatever' + String.fromCodePoint(0xe200) + 'cite' +
+    String.fromCodePoint(0xe202) + 'turn0search3' + String.fromCodePoint(0xe202) + 'turn0news1' + String.fromCodePoint(0xe202) + 'turn1view2' + String.fromCodePoint(0xe201) }] });
   assert.equal(r.issues.length, 1);
   // one word off in a longer quote
   r = V.filterAuditIssues(AUDIT_HTML, { verdict: 'fix', issues: [{ severity: 'high', quote: 'Most cars need between 30 and 36 psi, as the door sticker shows' }] });
@@ -1604,6 +1628,9 @@ test('runSafetyGate: bad edits fail closed (html = reference, candidateHtml = th
   // only the marker is missing: still blocked
   r = await V.runSafetyGate(ORIG, GOOD, Object.assign({}, GATE, NOFETCH));
   assert.deepEqual(codes(r.errors), ['END_MARKER_MISSING']);
+  assert.equal(r.ok, false);
+  assert.equal(r.html, ORIG);
+  assert.equal(r.candidateHtml, GOOD);
   // a table row lost
   r = await V.runSafetyGate(T_ORIG, replaceOnce(T_GOOD, '<tr><td>Small car</td><td>30 to 32 psi</td></tr>', '') + '\n' + END, Object.assign({}, GATE, NOFETCH));
   expectError(r, 'TABLE_LOSS');

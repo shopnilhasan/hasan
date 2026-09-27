@@ -549,7 +549,8 @@ async function closeOrphanedWorkTabs() {
   runtime.bridgeTabId = null;
   if (!ids.length) return;
   const okOrigins = new Set();
-  [runtime.job?.site?.url, runtime.job?.aiUrl, runtime.job?.fallbackAi?.aiUrl].forEach((u) => {
+  // v3.46.0: the fact-check AI's tabs (a different AI than the job's) too.
+  [runtime.job?.site?.url, runtime.job?.aiUrl, runtime.job?.fallbackAi?.aiUrl, runtime.job?.factCheckAi?.aiUrl].forEach((u) => {
     try { if (u) okOrigins.add(new URL(u).origin); } catch (e) {}
   });
   let closed = 0;
@@ -1073,7 +1074,7 @@ async function processLoop() {
       log('err', '🚫 [' + num + '/' + total + '] ' + slug + ' — ' + lastErr.message);
       if (attemptTabs.ai)   { await safeCloseTab(attemptTabs.ai);   attemptTabs.ai = null; }
       if (attemptTabs.edit) { await safeCloseTab(attemptTabs.edit); attemptTabs.edit = null; }
-      await pauseForModelLimit(runtime.job.aiName, lastErr.message, lastErr.limitDetection);
+      await pauseForModelLimit(lastErr.aiName || runtime.job.aiName, lastErr.message, lastErr.limitDetection);
       continue;   // the top-of-loop pause gate holds the batch here
     } else {
       const errMsg = lastErr?.message || 'Unknown error';
@@ -1285,13 +1286,42 @@ function rememberAttempt(rawInput, slug, result, message, links) {
     aiSessionUrl: durableSessionUrl,
     aiName: links?.aiName || runtime.job?.aiName || '',
     auditRetry: links?.auditRetry === true,
-    // Safety Gate / Fact-Check details of this attempt (v3.46.0).
-    gate: links?.gate || null,
-    factCheck: links?.factCheck || null,
+    // Safety Gate / Fact-Check details of this attempt (v3.46.0) — a small
+    // summary only: runtime.attempts (up to 2,000 rows) goes to the panel
+    // every second and is persisted often. The full detail is in the log.
+    gate: attemptGateSummary(links?.gate),
+    factCheck: attemptFactCheckSummary(links?.factCheck),
     time: new Date().toLocaleTimeString(),
     isoTime: new Date().toISOString()
   });
   runtime.attempts = runtime.attempts.slice(-MAX_ATTEMPTS);
+}
+
+function attemptGateSummary(g) {
+  if (!g || typeof g !== 'object') return null;
+  const clip = (list, n, max) => (Array.isArray(list) ? list : []).slice(0, n)
+    .map((x) => String(x === undefined || x === null ? '' : x).slice(0, max));
+  return {
+    codes: clip(g.codes, 20, 60),
+    messages: clip(g.messages, 5, 300),
+    warnings: clip(g.warnings, 5, 200),
+    removedLinks: Array.isArray(g.removedLinks) ? g.removedLinks.length : (Number(g.removedLinks) || 0)
+  };
+}
+
+function attemptFactCheckSummary(f) {
+  if (!f || typeof f !== 'object') return null;
+  const issues = Array.isArray(f.issues) ? f.issues : [];
+  const out = {
+    verdict: String(f.verdict || '').slice(0, 20),
+    issues: compactFactIssues(issues.slice(0, 5)),
+    issueCount: issues.length,
+    dropped: Array.isArray(f.dropped) ? f.dropped.length : (Number(f.dropped) || 0),
+    aiSessionUrl: String(f.aiSessionUrl || ''),
+    fixRound: f.fixRound === true
+  };
+  if (f.error) out.error = String(f.error).slice(0, 300);
+  return out;
 }
 
 function buildAuditFixNote(issues) {
@@ -1371,6 +1401,9 @@ async function runParallelBatch() {
         } catch (e) {
           lastErr = e;
           if (e.code === 'POST_NOT_FOUND' || e.code === 'USER_STOPPED') break;
+          // v3.46.0: a usage / model limit is not retried (every retry would
+          // hit the same wall) — the batch pauses below, as in processLoop.
+          if (e.code === 'AI_LIMIT' || e.code === 'MODEL_LIMIT') break;
         }
       }
 
@@ -1410,6 +1443,23 @@ async function runParallelBatch() {
           log('info', '[' + num + '/' + total + '] Queued "' + slug + '" for the end-of-batch retry pass.');
         }
         if (lastErr?.code === 'POST_NOT_FOUND' && job.onMissing === 'stop') missingStop = true;
+        // v3.46.0: an AI usage / model limit (the edit AI's or the fact-check
+        // AI's) PAUSES the whole parallel batch, as processLoop does, instead
+        // of failing every remaining post against the same wall. The other
+        // slots hold at their next pause check; Resume (or the model-limit
+        // timer) continues. This post stays failed / queued for the retry pass.
+        if (!runtime.stopRequested && !runtime.paused) {
+          if (lastErr?.code === 'MODEL_LIMIT') {
+            await pauseForModelLimit(lastErr.aiName || job.aiName, lastErr.message, lastErr.limitDetection);
+          } else if (lastErr?.code === 'AI_LIMIT' && limitGuardOn()) {
+            runtime.paused = true;
+            runtime.autoPauseReason = '⛔ Paused — AI usage limit reached (' +
+              String(lastErr.limitText || 'the provider is refusing new messages').slice(0, 140) +
+              '). Wait for the limit to reset or switch AI, then press Resume.';
+            log('warn', '⛔ ' + runtime.autoPauseReason);
+            notifyBatchDone('Paused — AI usage limit', 'The AI reported a usage/weekly limit. The batch is paused; resume after the limit resets or switch to another AI.');
+          }
+        }
       }
 
       if (attemptTabs.ai)   { await safeCloseTab(attemptTabs.ai);   attemptTabs.ai = null; }
@@ -4098,11 +4148,27 @@ async function withWorkerFocus(fn) {
   }
 }
 
+// v3.46.0: one copy capture, capped in time. A page that never answers (a
+// clipboard permission prompt nobody clicks, a hung renderer) must not hold
+// the post: after COPY_CAPTURE_TIMEOUT_MS the capture yields null and the
+// caller carries on with the on-screen text.
+const COPY_CAPTURE_TIMEOUT_MS = 20000;
+function copyCaptureWithTimeout(tabId, providerKind, strictCodeOnly) {
+  return withWorkerFocus(() => {
+    let timer = null;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve(null), COPY_CAPTURE_TIMEOUT_MS); });
+    return Promise.race([
+      runInTabMain(tabId, captureCopyButtonText, [providerKind || '', true, strictCodeOnly]),
+      timeout
+    ]).finally(() => clearTimeout(timer));
+  });
+}
+
 async function tryCopyButtonExtract(tabId, originalHtml, promptText, strictMode, providerKind, allowAnyCode) {
   try {
     const compOpts = allowAnyCode ? null : completenessOptions();
     for (const strictCodeOnly of [true, false]) {
-      const r = await withWorkerFocus(() => runInTabMain(tabId, captureCopyButtonText, [providerKind || '', true, strictCodeOnly]));
+      const r = await copyCaptureWithTimeout(tabId, providerKind, strictCodeOnly);
       const copied = htmlFromCopyCapture((r && r.result) || '');
       if (!copied || copied.length < 300) continue;
       const verify = allowAnyCode
@@ -4124,7 +4190,7 @@ async function tryCopyRaw(tabId, providerKind) {
   let best = '';
   try {
     for (const strictCodeOnly of [true, false]) {
-      const r = await withWorkerFocus(() => runInTabMain(tabId, captureCopyButtonText, [providerKind || '', true, strictCodeOnly]));
+      const r = await copyCaptureWithTimeout(tabId, providerKind, strictCodeOnly);
       const html = htmlFromCopyCapture((r && r.result) || '');
       if (html && html.length > best.length) best = html;
     }
@@ -4534,7 +4600,17 @@ async function updateWordPressItemViaRest(site, siteUrl, item, html) {
 
 // Save the ORIGINAL article HTML (with title + link) before we overwrite it, so
 // a bad edit can always be restored. Kept in storage; downloadable as a ZIP.
-async function saveOriginalBackup(slug, title, link, html, aiSession) {
+// v3.46.0: backups are written one at a time. Parallel slots used to read the
+// list at the same moment and each write back its own copy, so all but one
+// backup were lost (and the Safety Gate lost its reference original).
+let originalBackupChain = Promise.resolve();
+function saveOriginalBackup(slug, title, link, html, aiSession) {
+  const run = originalBackupChain.then(() => saveOriginalBackupNow(slug, title, link, html, aiSession));
+  originalBackupChain = run.catch(() => {});
+  return run;
+}
+
+async function saveOriginalBackupNow(slug, title, link, html, aiSession) {
   try {
     if (!html || String(html).length < 20) return;
     const data = await chrome.storage.local.get('__originalsBackup');
@@ -4575,6 +4651,22 @@ function freshFromBackupOn() {
   return runtime.job?.freshFromBackup === true;
 }
 
+// v3.46.0: does this backup belong to the site the job is running on? Its
+// post link is on the site's host, or its site name is the job's site name.
+// Two of the user's sites can share a slug; one site's article must never be
+// used to rebuild (Fresh Recovery) or to judge (Safety Gate) the other's.
+function backupMatchesJobSite(b) {
+  const site = (runtime.job && runtime.job.site) || {};
+  const siteHost = normalizeGateHost(site.url);
+  const siteName = String(site.name || '');
+  const linkHost = normalizeGateHost(b && b.link);
+  const backupName = String((b && b.site) || '');
+  if (!linkHost && !backupName) return true;     // no site recorded (older data): cannot tell
+  if (!siteHost && !siteName) return true;       // no site on the job: cannot tell
+  if (siteHost && linkHost && linkHost === siteHost) return true;
+  return !!(siteName && backupName && backupName === siteName);
+}
+
 async function findOriginalBackup(slug, rawSlug) {
   const want = cleanSlug(slug || '');
   const wantRaw = cleanSlug(rawSlug || '');
@@ -4590,7 +4682,7 @@ async function findOriginalBackup(slug, rawSlug) {
   // is the most "original" HTML we hold for this post.
   const matches = arr.filter((b) => {
     const s = cleanSlug(b?.slug || '');
-    return s && (s === want || (wantRaw && s === wantRaw));
+    return s && (s === want || (wantRaw && s === wantRaw)) && backupMatchesJobSite(b);
   });
   if (!matches.length) return null;
   matches.sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')));
@@ -4770,6 +4862,8 @@ async function processSlug(slug, num, total, attemptLinks, tryNum, attemptTabs) 
   await sleep(1800);
 
   // ── 10) Paste new HTML ───────────────────────────────────────────────
+  // Stop pressed while the editor tab was being focused: nothing is pasted.
+  throwIfStopped();
   setStatus(tag + ' Clearing code box and pasting new HTML');
   log('step', tag + ' Step 10: Pasting new HTML into editor');
   const pasteResult = await runInTab(editTab.id, clearAndPasteHtml, [aiHtml]);
@@ -4961,6 +5055,8 @@ async function sessionOriginalFor(slug, rawInput, fallbackHtml) {
     if (!b || Number(b.sessionId) !== sid) return false;
     const s = cleanSlug(b.slug || '');
     if (!s || !(s === want || (wantRaw && s === wantRaw))) return false;
+    // The site can be switched live during a run: same slug, other site ≠ this post.
+    if (!backupMatchesJobSite(b)) return false;
     return String(b.html || '').trim().length >= 30;
   });
   if (!matches.length) return fallback;
@@ -4968,9 +5064,40 @@ async function sessionOriginalFor(slug, rawInput, fallbackHtml) {
   return String(matches[0].html).trim();
 }
 
+// True for loopback, private-network, link-local and single-label hosts —
+// addresses no reader of a published article can open. hostname = URL.hostname
+// (already normalised: "2130706433" / "0x7f.1" arrive as "127.0.0.1").
+function isPrivateNetworkHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!h) return true;
+  if (h === 'localhost' || /\.(?:localhost|local|internal|lan|home|intranet)$/.test(h)) return true;
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const a = Number(v4[1]);
+    const b = Number(v4[2]);
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (h.indexOf(':') >= 0) {
+    return h === '::' || h === '::1' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || /^::ffff:/.test(h);
+  }
+  return h.indexOf('.') < 0;   // "intranet", "router": single-label names
+}
+
 // fetch() wrapper for the gate's link check: no cookies, no cache, and a hard
 // timeout so one slow site can never hold a post.
+// v3.46.0: a NEW link to a loopback / private-network address (the AI can be
+// steered by text inside an article) is never requested from the user's
+// browser; it fails like an unknown host, so the gate unwraps the link.
 function gateFetch(url, init) {
+  let host = '';
+  try { host = new URL(String(url)).hostname; } catch (e) {}
+  if (isPrivateNetworkHost(host)) {
+    const blocked = new TypeError('Failed to fetch: ' + (host || 'this address') + ' is a local / private network address (not requested)');
+    blocked.code = 'ENOTFOUND';
+    return Promise.reject(blocked);
+  }
   const opts = Object.assign({}, init || {});
   const controller = (typeof AbortController === 'function') ? new AbortController() : null;
   let timer = null;
@@ -4998,8 +5125,8 @@ function gateFetch(url, init) {
 // they must never appear in a gate / fact-check failure message.
 function safetyMessageText(value) {
   return String(value === undefined || value === null ? '' : value)
-    .replace(/AUDIT ISSUES/gi, 'audit problems')
     .replace(/\s+/g, ' ')
+    .replace(/AUDIT ISSUES/gi, 'audit problems')
     .trim();
 }
 
@@ -5058,7 +5185,12 @@ async function runSafetyGateStep(ctx, referenceHtml, aiHtml, label) {
     endMarker: 'APU-END',
     // The prompt asks for the end marker => a reply without it was cut off.
     requireEndMarker: String(runtime.job.prompt || '').indexOf('APU-END') >= 0,
-    fetchFn: gateFetch
+    fetchFn: gateFetch,
+    // v3.46.0: the same local date as [[TODAY]] (today's date added without
+    // web research) and the post title (TITLE_IN_BODY) — both checks are off
+    // in the validator unless these are given.
+    today: localDateYmd(),
+    postTitle: (links && links.postTitle) || plainPostTitle(ctx && ctx.wpItem && ctx.wpItem.title)
   };
   setStatus(tag + ' 🛡 Safety Gate: checking the ' + what + ' edit');
   log('step', tag + ' 🛡 Safety Gate: checking the ' + what + ' edit (' + String(aiHtml || '').length +
@@ -5152,20 +5284,40 @@ function validateFactCheckObject(obj) {
   return { ok: true, audit: Object.assign({}, obj, { verdict, issues }) };
 }
 
-// Reply text → { ok: true, audit } | { ok: false, error }. Tries ``` code
-// blocks first, then the text itself as JSON (a code block read from the
-// page), then the first balanced {...} that contains "verdict". Smart quotes
-// are NOT repaired (a reply that uses them is not valid JSON).
+// v3.46.0: when one reply holds SEVERAL valid verdicts (a draft "pass" then a
+// corrected "reject", or a restated example), the most severe one wins
+// (reject > fix > pass) — never the first, which would fail open. Ties go to
+// the later one (the AI's final word). audits = [{ audit, pos }].
+function mostSevereFactCheck(audits) {
+  const rank = { pass: 0, fix: 1, reject: 2 };
+  let best = null;
+  (audits || []).forEach((a) => {
+    if (!a || !a.audit) return;
+    const r = rank[a.audit.verdict] || 0;
+    if (!best || r > best.rank || (r === best.rank && (a.pos || 0) >= best.pos)) best = { audit: a.audit, rank: r, pos: a.pos || 0 };
+  });
+  return best ? best.audit : null;
+}
+
+// Reply text → { ok: true, audit } | { ok: false, error }. Reads ``` code
+// blocks, the text itself as JSON (a code block read from the page), and
+// every balanced {...} that contains "verdict"; of all valid verdicts the
+// most severe wins (mostSevereFactCheck). Smart quotes are NOT repaired (a
+// reply that uses them is not valid JSON).
 function parseFactCheckReply(text) {
   const raw = String(text || '').trim();
   if (!raw) return { ok: false, error: 'empty reply' };
   let lastError = 'no JSON object with a "verdict" was found';
-  const tryParse = (candidate) => {
+  const found = [];
+  const seen = new Set();
+  const tryParse = (candidate, pos) => {
     let obj;
     try { obj = JSON.parse(candidate); }
     catch (e) { lastError = 'invalid JSON (' + ((e && e.message) || 'parse error') + ')'; return null; }
     const checked = validateFactCheckObject(obj);
     if (!checked.ok) { lastError = checked.error; return null; }
+    const key = JSON.stringify(checked.audit);
+    if (!seen.has(key)) { seen.add(key); found.push({ audit: checked.audit, pos }); }
     return checked.audit;
   };
   // 1) Fenced code blocks: ```json … ``` (or a plain ``` fence).
@@ -5174,16 +5326,12 @@ function parseFactCheckReply(text) {
   while ((m = fenceRe.exec(raw)) !== null) {
     const body = String(m[1] || '').trim();
     if (!body) continue;
-    const audit = tryParse(body);
-    if (audit) return { ok: true, audit };
+    tryParse(body, m.index);
   }
   // 2) The whole text is the JSON (maybe after a bare "json" label line).
   const bare = raw.replace(/^json[ \t]*\r?\n/i, '').trim();
-  if (bare.charAt(0) === '{') {
-    const audit = tryParse(bare);
-    if (audit) return { ok: true, audit };
-  }
-  // 3) The first balanced {...} that contains "verdict".
+  if (bare.charAt(0) === '{') tryParse(bare, 0);
+  // 3) Every balanced {...} that contains "verdict" (prose, rendered code).
   let scanned = 0;
   for (let i = raw.indexOf('{'); i >= 0 && scanned < 400; i = raw.indexOf('{', i + 1)) {
     scanned++;
@@ -5191,11 +5339,11 @@ function parseFactCheckReply(text) {
     if (end < 0) continue;
     const candidate = raw.slice(i, end + 1);
     if (candidate.indexOf('"verdict"') === -1) continue;
-    const audit = tryParse(candidate);
-    if (audit) return { ok: true, audit };
+    tryParse(candidate, i);
     i = end;
   }
-  return { ok: false, error: lastError };
+  const audit = mostSevereFactCheck(found);
+  return audit ? { ok: true, audit } : { ok: false, error: lastError };
 }
 
 // audit (parsed reply) → { action: 'pass'|'fix'|'fail', filtered }. Issues whose
@@ -5203,7 +5351,9 @@ function parseFactCheckReply(text) {
 // The shared filter's effectiveVerdict decides: reject → fail; fix (a HIGH
 // issue is left, or a HIGH issue's quote was not found — never downgraded) →
 // fix round with filtered.retryIssues; pass → pass (medium/low issues are only
-// logged). Without the filter (or without effectiveVerdict) the conservative
+// logged). An explicit "fix" verdict is never a pass: with medium/low issues
+// left it is a fix round too, with no usable issue it fails (EXT-SPEC §4).
+// Without the filter (or without effectiveVerdict) the conservative
 // rule below applies: reject → fail; any HIGH issue, or verdict "fix" with
 // issues → fix; otherwise pass. filtered.retryIssues is always an array.
 function decideFactCheck(audit, editedHtml, originalHtml) {
@@ -5238,6 +5388,20 @@ function decideFactCheck(audit, editedHtml, originalHtml) {
   else if (['pass', 'fix', 'reject'].indexOf(verdict) === -1 || verdict === 'reject') action = 'fail';
   else if (kept.some((i) => String((i && i.severity) || '').toLowerCase() === 'high')) action = 'fix';
   else if (verdict === 'fix' && kept.length > 0) action = 'fix';
+  // v3.46.0 (EXT-SPEC §4): an explicit "fix" verdict is never turned into a
+  // pass. The shared filter passes a "fix" whose remaining issues are only
+  // medium / low; here those issues go to the fix round. A "fix" that lists
+  // no usable issue at all (none, or entries that are not issue objects) is
+  // a contradictory reply and fails closed. Issues dropped only because their
+  // quote is not in the edit stay dropped (the anti-hallucination filter).
+  if (action === 'pass' && verdict === 'fix') {
+    const rawIssues = (audit && Array.isArray(audit.issues)) ? audit.issues : [];
+    if (kept.length > 0) action = 'fix';
+    else if (!rawIssues.length || rawIssues.some((i) => !i || typeof i !== 'object')) {
+      action = 'fail';
+      filtered.failReason = 'the fact-checker asked for a fix but listed no usable issue';
+    }
+  }
   // The issues the fix round must address (the filter's retryIssues include a
   // HIGH issue whose quote was not found); fallback: the kept issues.
   if (!Array.isArray(filtered.retryIssues) || !filtered.retryIssues.length) filtered.retryIssues = kept.slice();
@@ -5353,13 +5517,18 @@ async function factCheckPromptText() {
 
 // Polls the fact-check tab until the reply holds a valid JSON verdict.
 // Accepts when the AI is not generating, the reply has been stable ≥ 8 s and
-// it parses (code blocks first, then the first {...} with "verdict").
-// opts = { tag, promptText } (optional; promptText guards against reading our
-// own prompt back as the "reply").
+// it parses (code blocks and the message text; of several verdicts the most
+// severe wins). opts = { tag, promptText, aiName } (optional; promptText
+// guards against reading our own prompt back as the "reply", aiName names
+// the fact-check AI in a limit pause).
+// v3.46.0 review fixes: a static "Thinking…" / "Searching the web…" line (or
+// a stuck stop button) is the AI at work, never a finished reply without
+// JSON — only the overall timeout ends that wait; time spent paused does not
+// count; one last read runs before the timeout error.
 async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
   const o = opts || {};
   const tag = o.tag || '';
-  const start = Date.now();
+  let start = Date.now();
   const limitMs = Math.max(30000, Number(timeoutMs) || 180000);
   const POLL_INTERVAL = 2500;
   const MIN_WAIT_MS = 10000;
@@ -5367,6 +5536,9 @@ async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
   const STUCK_INDICATOR_MS = 75000;
   const NO_JSON_GIVEUP_MS = 30000;
   const NO_REPLY_GIVEUP_MS = 180000;
+  // Same activity words as the edit waiter (waitForAIResponse), for a SHORT
+  // reply text with no code block: that is a status line, not the verdict.
+  const WORKING_RE = /\b(thinking|thought|reasoning|working|analy[sz]ing|generating|writing|composing|processing|searching|browsing|researching|reading|drafting)\b/i;
   let lastKey = '';
   let lastChangeAt = start;
   let stoppedPolls = 0;
@@ -5375,35 +5547,65 @@ async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
   let lastParseError = '';
   let everGenerated = false;
   let lastActivityAt = start;
+  let peeked = false;
   const isOwnPrompt = (text) => {
     const t = String(text || '');
     if (/(?:ORIGINAL|EDITED) ARTICLE HTML (?:START|END)/.test(t)) return true;
     return !!(o.promptText && detectPromptLeak(t, o.promptText));
   };
+  const readSnapshot = async () => {
+    let snap = null;
+    try { snap = (await runInTab(tabId, readAIJsonSnapshot, [providerKind]))?.result || null; } catch (e) {}
+    let texts = Array.isArray(snap?.texts) ? snap.texts : [];
+    let messageText = String(snap?.messageText || '');
+    if (isOwnPrompt(messageText)) { texts = []; messageText = ''; }   // our own message, not the reply
+    texts = texts.filter((t) => !isOwnPrompt(t));
+    return { snap, texts, messageText };
+  };
+  // Every valid verdict in the code blocks and the message text; the most
+  // severe one wins (a draft "pass" never hides a later "reject").
+  const readVerdict = (texts, messageText) => {
+    const found = [];
+    texts.forEach((t, i) => {
+      const r = parseFactCheckReply(t);
+      if (r.ok) found.push({ audit: r.audit, pos: i + 1 }); else lastParseError = r.error;
+    });
+    if (messageText) {
+      const r = parseFactCheckReply(messageText);
+      if (r.ok) found.push({ audit: r.audit, pos: 0 }); else if (!found.length) lastParseError = r.error || lastParseError;
+    }
+    const audit = mostSevereFactCheck(found);
+    return audit ? { ok: true, audit } : null;
+  };
   while (Date.now() - start < limitMs) {
-    while (runtime.paused && !runtime.stopRequested) await sleep(500);
+    if (runtime.paused && !runtime.stopRequested) {
+      // Time spent paused does not count against the fact-check wait.
+      const pausedAt = Date.now();
+      while (runtime.paused && !runtime.stopRequested) await sleep(500);
+      const pausedMs = Date.now() - pausedAt;
+      start += pausedMs;
+      lastChangeAt += pausedMs;
+      lastActivityAt += pausedMs;
+    }
     throwIfStopped();
     const now = Date.now();
     const elapsed = Math.round((now - start) / 1000);
     await pumpFrozenTab(tabId);
     try { await runInTab(tabId, dismissBlockingDialogs); } catch (e) {}
-    let snap = null;
-    try { snap = (await runInTab(tabId, readAIJsonSnapshot, [providerKind]))?.result || null; } catch (e) {}
+    const { snap, texts, messageText } = await readSnapshot();
     // Usage limit: same rule as the edit tab — pause the batch, not a failure.
     if (snap?.usageLimit && limitGuardOn()) {
       const e = new Error('AI usage limit reached — ' + String(snap.usageLimit).slice(0, 120));
       e.code = 'AI_LIMIT';
       e.limitText = String(snap.usageLimit).slice(0, 200);
+      if (o.aiName) e.aiName = o.aiName;
       throw e;
     }
     const generating = snap?.isGenerating === true;
     if (generating) everGenerated = true;
     if (!generating) stoppedPolls++; else stoppedPolls = 0;
-    let texts = Array.isArray(snap?.texts) ? snap.texts : [];
-    let messageText = String(snap?.messageText || '');
-    if (isOwnPrompt(messageText)) { texts = []; messageText = ''; }   // our own message, not the reply
-    texts = texts.filter((t) => !isOwnPrompt(t));
     const hasReply = !!(messageText || texts.length);
+    const working = generating || (!texts.length && messageText.length <= 160 && WORKING_RE.test(messageText));
     const key = texts.join('\u0001') + '\u0002' + messageText;
     if (key !== lastKey) { lastKey = key; lastChangeAt = now; }
     const stableMs = now - lastChangeAt;
@@ -5412,30 +5614,37 @@ async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
     // A limited account may leave the composer usable but never reply.
     if (!hasReply && elapsed >= 12 && (now - lastLimitCheckAt) >= 20000) {
       lastLimitCheckAt = now;
-      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'no fact-check reply while a limit notice is showing');
+      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'no fact-check reply while a limit notice is showing', o.aiName);
       if (limitErr) throw limitErr;
     }
     if (!hasReply && !generating && (now - lastActivityAt) >= NO_REPLY_GIVEUP_MS) {
       throw factCheckError('the fact-check AI never replied (' + elapsed + 's' + (everGenerated ? ', it started but produced no text' : '') + ')');
     }
 
+    // Background-mode safety net (as the edit waiter): a fully covered worker
+    // window can be throttled so the AI never starts. Nudge it to the front
+    // once, then hand focus straight back.
+    if (isBackgroundMode() && !peeked && elapsed >= 25 && !generating && !hasReply) {
+      peeked = true;
+      try {
+        if (runtime.workerWindowId) { await chrome.windows.update(runtime.workerWindowId, { focused: true }); await sleep(350); }
+        await focusPanelIfVisible();
+      } catch (e) {}
+      log('info', tag + ' 🔎 Nudged the worker window so the fact-check AI starts replying.');
+    }
+
     const settled = (!generating && stoppedPolls >= 2 && stableMs >= STABLE_MS) ||
       (generating && stableMs >= STUCK_INDICATOR_MS);
     if (hasReply && settled && (now - start) >= MIN_WAIT_MS) {
-      let parsed = null;
-      for (let i = 0; i < texts.length && !parsed; i++) {
-        const r = parseFactCheckReply(texts[i]);
-        if (r.ok) parsed = r; else lastParseError = r.error;
-      }
-      if (!parsed) {
-        const r = parseFactCheckReply(messageText);
-        if (r.ok) parsed = r; else lastParseError = r.error || lastParseError;
-      }
+      const parsed = readVerdict(texts, messageText);
       if (parsed) {
         log('ok', tag + ' 🔎 Fact-check reply received (verdict "' + parsed.audit.verdict + '", ' + parsed.audit.issues.length + ' issue(s)).');
         return parsed;
       }
-      if (stableMs >= NO_JSON_GIVEUP_MS) {
+      // Give up on "no JSON" only once the AI has really finished: while it is
+      // still working (stop button showing, or a thinking / searching status
+      // line) keep waiting — the overall timeout is the cap.
+      if (!working && stableMs >= NO_JSON_GIVEUP_MS) {
         const preview = messageText.replace(/\s+/g, ' ').trim().slice(0, 160);
         throw factCheckError('the fact-check reply had no valid JSON verdict (' + lastParseError + ')' + (preview ? '. It said: "' + preview + '"' : ''));
       }
@@ -5448,6 +5657,19 @@ async function waitForFactCheckJson(tabId, timeoutMs, providerKind, opts) {
     setStatus(tag + ' 🔎 Fact check: ' + (generating ? 'AI working' : (hasReply ? 'reading the verdict' : 'waiting for the reply')) + '... (' + elapsed + 's)');
     await sleep(POLL_INTERVAL);
   }
+  // One last read: a finished verdict that landed during the final poll
+  // interval is used instead of being thrown away.
+  {
+    throwIfStopped();
+    const { snap, texts, messageText } = await readSnapshot();
+    if (snap && snap.isGenerating !== true) {
+      const parsed = readVerdict(texts, messageText);
+      if (parsed) {
+        log('ok', tag + ' 🔎 Fact-check reply received at the time limit (verdict "' + parsed.audit.verdict + '", ' + parsed.audit.issues.length + ' issue(s)).');
+        return parsed;
+      }
+    }
+  }
   throw factCheckError('no fact-check JSON within ' + Math.round(limitMs / 1000) + 's' + (lastParseError ? ' (' + lastParseError + ')' : ''));
 }
 
@@ -5459,6 +5681,9 @@ async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) 
   if (!ai.aiUrl) throw factCheckError('the fact-check AI has no web address');
   const providerKind = detectProviderKind(ai.aiUrl);
   const allowWebSearch = runtime.job.promptWebSearch === true;
+  if (['chatgpt', 'claude', 'gemini', 'grok', 'deepseek'].indexOf(providerKind) === -1) {
+    log('info', tag + ' 🔎 Fact check: ' + ai.aiName + ' is not ChatGPT, Claude, Gemini, Grok or DeepSeek — the verdict is read with generic page selectors. If the fact check keeps failing, choose one of those as the fact-check AI.');
+  }
   let tabId = null;
   let sessionUrl = '';
   try {
@@ -5471,7 +5696,7 @@ async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) 
     await reviveHiddenWindowFor(tabId, 'opening the fact-check AI tab');
     const ready = await waitForAIComposerReady(tabId, providerKind === 'claude' ? 150000 : 90000, providerKind);
     if (!ready.ok) {
-      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'the fact-check chat box never became usable');
+      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'the fact-check chat box never became usable', ai.aiName);
       if (limitErr) throw limitErr;
       throw factCheckError(ai.aiName + ' is not ready: ' + ready.error);
     }
@@ -5493,13 +5718,13 @@ async function runFactCheckInTab(ai, payload, instructionsText, tag, timeoutMs) 
     if (!sendResult.ok) {
       if (sendResult.stopped) throwIfStopped();
       if (sendResult.limited) throw modelLimitError(sendResult.limitDetection, ai.aiName);
-      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'the fact-check prompt could not be sent');
+      const limitErr = await limitErrorIfLimited(tabId, providerKind, tag, 'the fact-check prompt could not be sent', ai.aiName);
       if (limitErr) throw limitErr;
       throw factCheckError('the fact-check prompt was not sent: ' + sendResult.error);
     }
     sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl);
     log('ok', tag + ' 🔎 Fact-check prompt sent through ' + sendResult.method + ' — waiting for the JSON verdict.');
-    const parsed = await waitForFactCheckJson(tabId, timeoutMs, providerKind, { tag, promptText: instructionsText });
+    const parsed = await waitForFactCheckJson(tabId, timeoutMs, providerKind, { tag, promptText: instructionsText, aiName: ai.aiName });
     sessionUrl = await refreshAISessionUrl(tabId, sessionUrl, providerKind, ai.aiUrl);
     return { parsed, aiSessionUrl: sessionUrl };
   } catch (e) {
@@ -5555,6 +5780,8 @@ async function runFactCheck(ctx) {
       aiSessionUrl = r.aiSessionUrl || '';
     }
   } catch (e) {
+    // A limit on the fact-check AI pauses under THAT AI's name (v3.46.0).
+    if (e && (e.code === 'MODEL_LIMIT' || e.code === 'AI_LIMIT') && !e.aiName) e.aiName = ai.aiName;
     if (e && (e.code === 'MODEL_LIMIT' || e.code === 'AI_LIMIT' || e.code === 'USER_STOPPED' || e.code === 'FACT_CHECK_ERROR')) throw e;
     throw factCheckError((e && e.message) || String(e), (e && e.aiSessionUrl) || aiSessionUrl);
   }
@@ -5569,6 +5796,7 @@ async function runFactCheck(ctx) {
     retryIssues: Array.isArray(filtered.retryIssues) ? filtered.retryIssues : issues,
     aiSessionUrl,
     action: decision.action,
+    reason: filtered.failReason || '',
     aiName: ai.aiName
   };
 }
@@ -5603,11 +5831,31 @@ async function regenerateForFactCheckFix(ctx, referenceHtml, note) {
   }
 }
 
+// <!-- APU-END --> end markers removed (SafetyGate.stripEndMarkers when the
+// gate file is loaded, else the same pattern). Text without a marker comes
+// back unchanged, byte for byte.
+function stripEndMarkersForSave(html) {
+  const s = String(html === undefined || html === null ? '' : html);
+  if (!/<!--\s*APU-END\s*-->/i.test(s)) return html;
+  const api = safetyGateApi();
+  let out = '';
+  try {
+    out = (api && typeof api.stripEndMarkers === 'function') ? String(api.stripEndMarkers(s, 'APU-END')) : '';
+  } catch (e) { out = ''; }
+  if (!out || /<!--\s*APU-END\s*-->/i.test(out)) {
+    out = s.replace(/^[ \t]*<!--\s*APU-END\s*-->[ \t]*(?:\r?\n|$)/gim, '').replace(/<!--\s*APU-END\s*-->/gi, '');
+  }
+  return out.trim();
+}
+
 // THE HOOK (processSlug, both branches, before ANY write). Returns the final
 // HTML to save. ctx = { slug, tag, num, total, originalHtml, aiHtml,
-// attemptLinks, attemptTabs, wpItem, stepNo }. Gate OFF → aiHtml unchanged.
+// attemptLinks, attemptTabs, wpItem, stepNo }. Gate OFF → aiHtml unchanged
+// (only <!-- APU-END --> end markers are removed).
 async function applySafetyPipeline(ctx) {
-  if (!safetyGateOn()) return ctx.aiHtml;
+  // Gate OFF: the edit is saved as generated, except that an end marker the
+  // prompt asked for (<!-- APU-END -->) is never written into the post.
+  if (!safetyGateOn()) return stripEndMarkersForSave(ctx.aiHtml);
   const tag = ctx.tag || '';
   const links = ctx.attemptLinks || {};
   // 1) Compare with the TRUE original of this run (not an already-edited post).
@@ -5617,7 +5865,9 @@ async function applySafetyPipeline(ctx) {
   }
   // 2-4) Code Safety Gate (not relaxed by any recovery / any-code mode).
   let html = await runSafetyGateStep(ctx, reference, ctx.aiHtml, 'AI');
-  if (!factCheckOn()) return html;
+  // Stop / Emergency Stop pressed during the link check or the fact check:
+  // nothing is written (v3.46.0).
+  if (!factCheckOn()) { throwIfStopped(); return html; }
 
   // 5) AI Fact-Check, with at most ONE fix round per attempt.
   let fixRoundUsed = false;
@@ -5637,6 +5887,7 @@ async function applySafetyPipeline(ctx) {
       };
       if (runtime.job.factCheckOnError === 'save') {
         log('warn', tag + ' 🔎 The fact check itself failed (' + (e.factCheckReason || e.message) + ') — saving the gate-approved edit anyway (setting: if the fact check breaks → save).');
+        throwIfStopped();
         return html;
       }
       log('err', tag + ' 🔎 The fact check itself failed (' + (e.factCheckReason || e.message) + ') — keeping the original (setting: if the fact check breaks → keep original).');
@@ -5655,13 +5906,14 @@ async function applySafetyPipeline(ctx) {
     if (fc.action === 'pass') {
       fc.issues.forEach((i) => log('info', tag + ' 🔎 Minor: ' + factIssueText(i)));
       log('ok', tag + ' 🔎 Fact check PASSED (verdict "' + fc.verdict + '"' + (fixRoundUsed ? ', after one fix round' : '') + ').');
+      throwIfStopped();
       return html;
     }
     const blocking = (Array.isArray(fc.retryIssues) && fc.retryIssues.length) ? fc.retryIssues : fc.issues;
     blocking.forEach((i) => log('warn', tag + ' 🔎 ' + factIssueText(i) + (i && i.quoteNotFound ? ' [quote not found word for word]' : '')));
     if (fc.action === 'fail' || fixRoundUsed) {
       log('err', tag + ' 🔎 FACT CHECK BLOCKED the edit (verdict "' + fc.verdict + '"' + (fixRoundUsed ? ', after the fix round' : '') + ') — the post is NOT changed.');
-      throw factCheckBlockedError(fc, fixRoundUsed);
+      throw factCheckBlockedError(fc, fixRoundUsed, fc.reason);
     }
     // 2.6) Fix round: once per attempt, from the ORIGINAL, in a NEW chat.
     fixRoundUsed = true;
@@ -6637,15 +6889,31 @@ function cleanExtractedArticle(text) {
 
 // Index of the first shortcode ([name ...] or [/name]) that starts a line, or
 // -1. Markdown links "[text](url)" and one-letter "[x]" boxes are not shortcodes.
+// Shortcode names are lower case ("[Final HTML]", "[Summary] …" are chat
+// labels, not shortcodes). A plain name ([toc], [caption …], [embed]) must
+// also end its line, be followed by a tag, another shortcode or a URL, or be
+// closed on the same line ([quote]…[/quote]) — "[note] I kept …" is chat
+// text. A plugin-style name with "_" or "-" ([su_note], [et_pb_section]) may
+// wrap text.
 function leadingShortcodeIndex(s) {
-  const re = /(^|\n)([ \t]*)\[\/?[a-z][a-z0-9_-]+(?=[ \t\]\/])[^\]\[\n]{0,2000}\](?!\()/i;
-  const m = re.exec(String(s || ''));
-  return m ? m.index + m[1].length + m[2].length : -1;
+  const re = /(^|\n)([ \t]*)\[\/?([a-z][a-z0-9_-]+)(?=[ \t\]\/])[^\]\[\n]{0,2000}\](?!\()/g;
+  const str = String(s || '');
+  let m;
+  while ((m = re.exec(str)) !== null) {
+    const rest = str.slice(m.index + m[0].length);
+    const line = rest.split('\n')[0];
+    if (/[_-]/.test(m[3]) || /^[ \t]*(?:\r?$|<|\[|https?:\/\/)/.test(line) || line.indexOf('[/' + m[3] + ']') >= 0) {
+      return m.index + m[1].length + m[2].length;
+    }
+    re.lastIndex = m.index + m[0].length;
+  }
+  return -1;
 }
 
 // Extends an article end past trailing lines that are shortcodes (e.g.
 // "[related_posts]" or "[embed]url[/embed]" after the last tag). Stops at a
-// code fence so chat text after the code block is never included.
+// code fence so chat text after the code block is never included. Shortcode
+// names are lower case ("[Note] …]" is a chat label).
 function trailingShortcodeEnd(s, end) {
   const tail = String(s || '').slice(end);
   if (tail.indexOf('[') < 0) return end;
@@ -6656,7 +6924,7 @@ function trailingShortcodeEnd(s, end) {
     const line = lines[i];
     const t = line.trim();
     if (/^```/.test(t)) break;
-    if (/^\[\/?[a-z][a-z0-9_-]+(?=[ \t\]\/])/i.test(t) && /\]$/.test(t) && !/\]\(/.test(t)) {
+    if (/^\[\/?[a-z][a-z0-9_-]+(?=[ \t\]\/])/.test(t) && /\]$/.test(t) && !/\]\(/.test(t)) {
       best = pos + line.replace(/\s+$/, '').length;
     }
     pos += line.length + 1;
@@ -7430,10 +7698,15 @@ function assessHtmlCompleteness(html, originalHtml, options) {
   // truncation when the document does not otherwise look finished: any hard
   // failure above, or no finished-looking tail (closing </html> or a
   // conclusion-style final section).
+  // v3.46.0: a reply that ENDS with the <!-- APU-END --> marker the prompt
+  // asked for was not cut off, so it has a finished tail too (the Safety Gate
+  // judges lost content). Without this, the prompt's own FAQ-accordion
+  // rebuild (H3 questions → <details>) made complete edits look truncated.
   const srcH = (src.match(/<h[23][\s>]/gi) || []).length;
   const outH = (out.match(/<h[23][\s>]/gi) || []).length;
   if (srcH >= 3 && outH < Math.ceil(srcH * sectionRatio)) {
-    const finishedTail = /<\/html\s*>\s*$/i.test(out.replace(/```+\s*$/, '').trim()) || hasConclusionMarker(out);
+    const tail = out.replace(/```+\s*$/, '').trim();
+    const finishedTail = /<\/html\s*>\s*$/i.test(tail) || hasConclusionMarker(out) || /<!--\s*APU-END\s*-->$/i.test(tail);
     if (reasons.length > 0 || !finishedTail) {
       reasons.push(outH + ' of ~' + srcH + ' section headings present (sections look missing)');
     }
@@ -7599,12 +7872,36 @@ function hasIntroFaqConclusion(html) {
   return { ok: missing.length === 0, missing };
 }
 
+// Audit-report text in the first 4000 chars of an extracted article.
+// Gate OFF: the v3.45.0 check (the phrase anywhere). Gate ON (v3.46.0): only a
+// line that IS a report heading / divider ("── FIXED ARTICLE ──",
+// "## AUDIT ISSUES", <h2>Full Audit Report</h2>) counts, and only when the
+// original article does not have that line itself — "a fixed article of
+// clothing" inside a paragraph is article text. The Safety Gate blocks any
+// other stray report / chat text.
+const REPORT_LEAK_RE = /Full Audit Report|Extracted Article Information|Prioritized Action Checklist|Complete Updated Body-Only HTML|AUDIT ISSUES|FIXED ARTICLE/i;
+function reportLeakLineCount(html) {
+  // Inline tags vanish, every other tag breaks the line: each element's text
+  // becomes its own line.
+  const text = String(html || '')
+    .replace(/<\/?(?:a|abbr|b|code|em|i|mark|small|span|strong|sub|sup|u)\b[^>]*>/gi, '')
+    .replace(/<[^>]*>/g, '\n');
+  const re = /^[^A-Za-z0-9\n]{0,40}(?:\d+\.[^A-Za-z0-9\n]{0,10})?(?:PART[ \t]+\d+[^A-Za-z0-9\n]{0,10})?(?:Full Audit Report|Extracted Article Information|Prioritized Action Checklist|Complete Updated Body-Only HTML|AUDIT ISSUES|FIXED ARTICLE)\b[^\n]{0,60}$/gim;
+  return (text.match(re) || []).length;
+}
+function hasReportLeak(html, originalHtml) {
+  const head = String(html || '').slice(0, 4000);
+  if (!safetyGateOn()) return REPORT_LEAK_RE.test(head);
+  const n = reportLeakLineCount(head);
+  return n > 0 && n > reportLeakLineCount(originalHtml);
+}
+
 function verifyRecoverableHtml(html, promptText) {
   const text = String(html || '').trim();
   if (text.length < 80) return { ok: false, reason: 'too little HTML to recover (' + text.length + ' chars)' };
   const promptLeak = detectPromptLeak(text, promptText);
   if (promptLeak) return { ok: false, reason: promptLeak };
-  if (/Full Audit Report|Extracted Article Information|Prioritized Action Checklist|Complete Updated Body-Only HTML|AUDIT ISSUES|FIXED ARTICLE/i.test(text.slice(0, 4000))) {
+  if (hasReportLeak(text, '')) {
     return { ok: false, reason: 'AI audit/report text leaked into extracted HTML' };
   }
   if (!/<[a-z][\s\S]*>/i.test(text)) return { ok: false, reason: 'no HTML tags found' };
@@ -7620,7 +7917,7 @@ function verifyHtml(html, originalHtml, promptText, strictMode) {
   if (!html || html.length < minLen) return { ok: false, reason: 'too short (' + (html?.length || 0) + ' chars)' };
   const promptLeak = detectPromptLeak(html, promptText);
   if (promptLeak) return { ok: false, reason: promptLeak };
-  if (/Full Audit Report|Extracted Article Information|Prioritized Action Checklist|Complete Updated Body-Only HTML|AUDIT ISSUES|FIXED ARTICLE/i.test(String(html || '').slice(0, 4000))) {
+  if (hasReportLeak(html, originalHtml)) {
     return { ok: false, reason: 'AI audit/report text leaked into extracted HTML' };
   }
   if (originalHtml && equivalentHtml(html, originalHtml)) {
@@ -7902,7 +8199,8 @@ function prepareAIProviderPage(providerKind, allowWebSearch) {
   // and switch it off so the AI edits the pasted article offline.
   // v3.46.0: allowWebSearch === true (the prompt allows web search) keeps plain
   // search / web / browse toggles as they are and only switches OFF deep
-  // research / research / deep search / agent modes.
+  // research / research / deep search / agent modes. An active agent mode is
+  // switched off in BOTH cases (it was missing from the v3.45.0 list).
   function visible(el) {
     const r = el?.getBoundingClientRect?.();
     return !!r && (r.width > 0 && r.height > 0 || (window.innerWidth || 0) < 500 || !document.documentElement?.getBoundingClientRect().width);
@@ -7918,7 +8216,7 @@ function prepareAIProviderPage(providerKind, allowWebSearch) {
   let changed = 0;
   const offPattern = allowWebSearch === true
     ? /\b(deepsearch|deep search|deep research|research|agent|agent mode)\b/
-    : /\b(search|deepsearch|deep search|research|browse|web)\b/;
+    : /\b(search|deepsearch|deep search|research|browse|web|agent|agent mode)\b/;
   const controls = [...document.querySelectorAll('button, [role="button"], input[type="checkbox"]')].filter(visible);
   controls.forEach((el) => {
     const label = labelOf(el);
@@ -8876,6 +9174,7 @@ function modelLimitError(detection, aiName) {
   err.code = 'MODEL_LIMIT';
   err.limitWhat = what;
   err.limitDetection = detection || null;   // carries resetText to the pause
+  err.aiName = aiName || '';                // v3.46.0: the AI that is limited (pause + alert name)
   return err;
 }
 
@@ -8943,13 +9242,16 @@ function modelLimitRetryHoursOf() {
 // usage/model limit. Returns a MODEL_LIMIT error to throw, or null. This is
 // what makes a limit PAUSE the run (with its reset time and alert) instead of
 // failing the post as "not ready" / "prompt was not sent".
-async function limitErrorIfLimited(tabId, providerKind, tag, extraContext) {
+// aiName (optional, v3.46.0): the AI this tab belongs to when it is not the
+// job's own AI (e.g. the fact-check AI), so the pause names the right one.
+async function limitErrorIfLimited(tabId, providerKind, tag, extraContext, aiName) {
+  const limitedAi = aiName || runtime.job?.aiName;
   try {
     const det = await checkAIModelLimit(tabId, providerKind, tag);
     if (det && det.limited) {
       log('warn', (tag ? tag + ' ' : '') + '⛔ The real cause is an AI limit' +
         (extraContext ? ' (' + extraContext + ')' : '') + ' — pausing instead of failing this post.');
-      return modelLimitError(det, runtime.job?.aiName);
+      return modelLimitError(det, limitedAi);
     }
     if (providerKind === 'gemini') {
       const flash = await checkGeminiFlashLimit(tabId, tag);
@@ -8958,7 +9260,7 @@ async function limitErrorIfLimited(tabId, providerKind, tag, extraContext) {
           kind: 'gemini-flash',
           evidence: flash.reason + (flash.offered ? ' (offered: ' + flash.offered + ')' : ''),
           resetText: ''
-        }, runtime.job?.aiName);
+        }, limitedAi);
       }
     }
   } catch (e) {
@@ -9472,6 +9774,24 @@ function readAIJsonSnapshot(providerKind) {
       nodes = [...document.querySelectorAll('[class*="message-bubble" i], [class*="response-content" i]')];
     } else if (providerKind === 'deepseek') {
       nodes = [...document.querySelectorAll('[class*="message" i][class*="assistant" i], .markdown')];
+    } else {
+      // v3.46.0: any other chat website (a custom AI address, Perplexity, AI
+      // Studio …) — the common assistant-message markers, most specific first.
+      const generic = [
+        '[data-message-author-role="assistant"]',
+        '[data-role="assistant"], [data-author="assistant"], [class*="assistant" i]',
+        '[class*="markdown" i], [class*="prose" i]',
+        '[class*="response" i], [class*="answer" i], [class*="model-message" i], [class*="bot-message" i]'
+      ];
+      for (let g = 0; g < generic.length && !nodes.length; g++) {
+        nodes = [...document.querySelectorAll(generic[g])].filter(el => {
+          if (!visible(el)) return false;
+          if (el.querySelector?.('[contenteditable="true"], textarea')) return false;
+          const text = (el.innerText || el.textContent || '').trim();
+          // A container that also holds our own message (the payload banners) is not the reply.
+          return text.length > 0 && text.indexOf('ARTICLE HTML START') < 0;
+        });
+      }
     }
     nodes = nodes.filter(visible);
     return nodes[nodes.length - 1] || null;
@@ -9551,6 +9871,20 @@ function readAIJsonSnapshot(providerKind) {
     };
     msg.querySelectorAll('pre').forEach(pre => push(pre.querySelector('code') || pre));
     msg.querySelectorAll('code').forEach(el => { if (!el.closest('pre')) push(el); });
+  }
+  // v3.46.0: no code block found in (or no match for) the assistant message —
+  // the last code blocks anywhere on the page, the way readAICodeSnapshot's
+  // global pass does. The caller drops our own prompt (echo guard), and the
+  // verdict must still parse and validate.
+  if (!texts.length) {
+    const seen = new Set();
+    [...document.querySelectorAll('pre')].filter(visible).slice(-6).forEach(pre => {
+      if (pre.closest('[contenteditable="true"], textarea')) return;
+      const t = textOf(pre.querySelector('code') || pre);
+      if (!t || seen.has(t)) return;
+      seen.add(t);
+      texts.push(t);
+    });
   }
   return {
     isGenerating: isGenerating(),
@@ -9730,10 +10064,16 @@ function captureCopyButtonText(providerKind, lastMessageOnly, strictCodeOnly) {
     }
     // Also try reading the system clipboard directly after the clicks — works
     // when the worker window is focused (the background script focuses it).
+    // v3.46.0: readText() can stay pending forever while Chrome's clipboard
+    // permission prompt is unanswered (focused tab, permission 'prompt'), so
+    // it is raced against a short timer — the capture never hangs a post.
     async function readClipboard() {
       try {
         if (navigator.clipboard && navigator.clipboard.readText) {
-          const t = await navigator.clipboard.readText();
+          const t = await Promise.race([
+            navigator.clipboard.readText(),
+            new Promise(function (res) { setTimeout(function () { res(''); }, 1500); })
+          ]);
           take(t);
         }
       } catch (_) {}

@@ -123,13 +123,18 @@ const PLACEHOLDER_PATTERNS = [
 // (TODO:/TBD are case-sensitive: Spanish "todo:" is a normal word.)
 const JSONLD_PLACEHOLDER_RE = /\{\{[^}]{0,40}\}\}|\[(?:VERIFY|verify|Verify|TODO|todo)\b|\bTODO\s*:|\bTBD\b|REAL-URL|real-url|PASTE YOUR|paste your/;
 
+// ChatGPT web-search citation tokens: the private-use delimiters (U+E200-U+E206) around "cite", "turn0search3" ...,
+// or the tokens left behind when a copy drops the delimiters ("citeturn0search3", "turn0search3turn0news5").
+const CHAT_CITATION_RE = /\ue200[^\ue200\ue201]{0,300}\ue201|[\ue200-\ue206]|(?:\b(?:cite|filecite|navlist)?|(?<=\d))turn\d{1,3}(?:search|news|view|fetch|file|image|product|academia|forecast|finance|sports)\d{1,3}/gi;
+
 // Markdown and search-tool citation artifacts (counted as edited minus original, visible text outside <pre>/<code>).
 const MARKDOWN_PATTERNS = [
   ['markdown link [text](url)', /\]\((?:https?:|\/)/g],
   ['markdown bold **text**', /\*\*[^*\s][^*]{0,200}?\*\*/g],
   ['citation mark \u3010\u2026\u3011', /\u3010[^\u3011]{0,40}\u3011/g],
   ['citation mark [cite\u2026]', /\[cite[^\]]{0,20}\]/gi],
-  ['numeric citation [n]', /(?:^|[^\w\]])\[\d{1,2}\](?!\()/g]
+  ['numeric citation [n]', /(?:^|[^\w\]])\[\d{1,2}\](?!\()/g],
+  ['chat citation token (citeturn0search3)', CHAT_CITATION_RE]
 ];
 const MARKDOWN_HEADING_RE = /(?:^|\n)[ \t]{0,3}#{1,6}[ \t]+\S/g;
 
@@ -2509,8 +2514,10 @@ function attributeText(html) {
   return parts.join(' | ');
 }
 
-// Citation marks a search tool may add to a quote: [1], \u30103\u2020source\u3011, [cite: 1], ([site.com](url)).
-const QUOTE_CITATION_RE = /\[\d{1,2}\]|\u3010[^\u3011]{0,60}\u3011|\[cite[^\]]{0,40}\]|\(\[[^\]]{0,80}\]\([^)]{0,300}\)\)/gi;
+// Citation marks a search tool may add to a quote: [1], \u30103\u2020source\u3011, [cite: 1], ([site.com](url)),
+// ChatGPT's citeturn0search3 tokens (CHAT_CITATION_RE).
+const QUOTE_CITATION_RE = new RegExp(/\[\d{1,2}\]|\u3010[^\u3011]{0,60}\u3011|\[cite[^\]]{0,40}\]|\(\[[^\]]{0,80}\]\([^)]{0,300}\)\)/.source +
+  '|' + CHAT_CITATION_RE.source, 'gi');
 
 /** Corpus prepared once per audit: normalised strings plus a token index for the fuzzy fallback. */
 function quoteCorpus(text) {

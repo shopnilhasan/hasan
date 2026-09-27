@@ -1,0 +1,11 @@
+{
+  "name": "apu-extension-tests",
+  "private": true,
+  "description": "Tests for the Auto Post Updater Pro extension (extension/). No dependencies: Node 22+ and the machine's Playwright/Chromium (see browser.js). `node --test extension-tests/` from the repo root runs the unit tests.",
+  "main": "unit.test.js",
+  "scripts": {
+    "test": "node --test unit.test.js",
+    "smoke": "node --test smoke.test.js",
+    "e2e": "node e2e/run-e2e.js"
+  }
+}

@@ -1778,7 +1778,7 @@ document.getElementById('startBtn').onclick = async () => {
     'AI timeout: ' + aiTimeoutDisplay + '\n' +
     (siteMode(site) === 'rest' ? '' : 'Wait after UPDATE: ' + updateWaitSec + 's\n') +
     'Completeness check: ' + (state.completeness || 'balanced') + '\n' +
-    safetyGateSummary() + '\n' +
+    safetyGateSummary(prompt) + '\n' +
     'Max retries per post: ' + retryCount + '\n' +
     'Posts at the same time: ' + parseInt(state.parallelCount || '1', 10) + (parseInt(state.parallelCount || '1', 10) > 1 ? ' ⚡' : ' (one by one)') + '\n' +
     'If a post fails: ' + (state.retryMode === 'inline' ? 'retry immediately' : state.retryMode === 'off' ? 'no automatic retry' : 'retry at the END of the batch') + '\n'
@@ -2453,9 +2453,14 @@ function renderGateDetails(item) {
     (g.warnings || []).forEach(w => { html += '<div style="color:#ffc46b;">• (warning) ' + escapeHtml(w) + '</div>'; });
   }
   if (f && (f.verdict || (f.issues || []).length)) {
+    // Rows restored from a backup are not re-compacted: never trust `dropped`.
+    const nDrop = Array.isArray(f.dropped) ? f.dropped.length : (Number(f.dropped) || 0);
     html += '<div style="margin-top:6px;"><b>🔎 Fact check</b>' + (f.verdict ? ' — verdict: ' + escapeHtml(f.verdict) : '') +
-      (f.dropped ? ' (' + f.dropped + ' issue' + (f.dropped === 1 ? '' : 's') + ' ignored: quote not found in the article)' : '') + '</div>';
-    if (f.error) html += '<div style="color:#ffc46b;">• The fact check itself failed: ' + escapeHtml(f.error) + '</div>';
+      (nDrop ? ' (' + nDrop + ' issue' + (nDrop === 1 ? '' : 's') + ' ignored: quote not found in the article)' : '') + '</div>';
+    if (f.error) {
+      html += '<div style="color:#ffc46b;">• The fact check itself failed' +
+        (item.result === 'updated' ? ' (the edit was saved WITHOUT a fact check — "Save anyway" setting)' : '') + ': ' + escapeHtml(f.error) + '</div>';
+    }
     (f.issues || []).forEach(i => {
       const sev = String(i.severity || '').toLowerCase();
       html += '<div style="color:' + (sev === 'high' ? '#ff8a8a' : '#ffc46b') + ';">• [' + escapeHtml(sev || '?') + '] ' +
@@ -2488,6 +2493,17 @@ function gateReasonsText(item) {
   return parts.join(' | ');
 }
 
+// Why the Safety Gate / Fact check blocked a Failed post, as the issue text a
+// retry sends with the post (issueMap → PRIORITY FIX note), so the new AI
+// session is told what to avoid. '' for every other row (and for a broken
+// fact check, which the editing AI cannot fix).
+function gateRetryIssuesText(item) {
+  if (!item || item.result !== 'failed') return '';
+  const kind = parseGateInfo(item.message).kind;
+  if (kind !== 'gate' && kind !== 'factcheck') return '';
+  return gateReasonsText(item).replace(/AUDIT\s+ISSUES/gi, 'audit problems').replace(/\s+/g, ' ').trim().slice(0, 900);
+}
+
 // Sort priority: missing FAQ+Conclusion → missing FAQ → missing Conclusion →
 // most audit issues → fewer audit issues.
 function auditSortRank(a) {
@@ -2513,6 +2529,11 @@ function renderResultItem(item, index, opts) {
   }
   // 🛡 v3.46.0: why the Safety Gate / Fact check blocked a Failed post.
   if (opts.gateBadges && result === 'failed') badges += gateBadgesHtml(item);
+  // Saved although the fact check itself broke ("Save anyway" setting): the
+  // edit went live WITHOUT a fact check, so it must not look verified.
+  if (result === 'updated' && item.factCheck && item.factCheck.verdict === 'error') {
+    badges += '<span class="pi-badge fact" title="' + escapeHtml('Saved WITHOUT a fact check — the fact check itself failed: ' + (item.factCheck.error || 'unknown error')) + '">🔎 Fact check skipped (error)</span>';
+  }
   const check = opts.checkbox
     ? '<input type="checkbox" class="audit-mark" data-key="' + escapeHtml(key) + '"' + (_auditSelected.has(key) ? ' checked' : '') + ' title="Mark this post for the bulk AI re-run">'
     : '';
@@ -2828,6 +2849,9 @@ function retryProcessedLink(index) {
   const r = (typeof resolveRunConfig === 'function') ? resolveRunConfig() : { ok: false, error: 'config unavailable' };
   if (!r.ok) return showMsg('Cannot retry: ' + r.error + '.', 'err');
   const job = Object.assign({ slugs: [slug] }, r.config);
+  // 🛡 A post blocked by the Safety Gate / Fact check is re-sent with the reasons.
+  const gateIssues = gateRetryIssuesText(item);
+  if (gateIssues) { job.issueMap = {}; job.issueMap[slug] = gateIssues; }
   chrome.runtime.sendMessage({ type: 'BATCH_START', job }, (resp) => {
     if (chrome.runtime.lastError) return showMsg('Error: ' + chrome.runtime.lastError.message, 'err');
     if (resp && resp.ok) {
@@ -2908,7 +2932,16 @@ function retryAllNewSession(rows, label) {
   if (!slugs.length) return showMsg('No ' + label + ' posts to retry.', 'err');
   const r = (typeof resolveRunConfig === 'function') ? resolveRunConfig() : { ok: false, error: 'config unavailable' };
   if (!r.ok) return showMsg('Cannot retry: ' + r.error + '.', 'err');
-  _bulkStart(Object.assign({ slugs }, r.config), 'Retrying ' + slugs.length + ' ' + label + ' post(s) in a new session, one by one...');
+  const job = Object.assign({ slugs }, r.config);
+  // 🛡 Posts blocked by the Safety Gate / Fact check are re-sent with the reasons.
+  const issueMap = {};
+  rows.forEach(p => {
+    const slug = _slugOfRow(p);
+    const gateIssues = slug && issueMap[slug] === undefined ? gateRetryIssuesText(p) : '';
+    if (gateIssues) issueMap[slug] = gateIssues;
+  });
+  if (Object.keys(issueMap).length) job.issueMap = issueMap;
+  _bulkStart(job, 'Retrying ' + slugs.length + ' ' + label + ' post(s) in a new session, one by one...');
 }
 // Intro/FAQ/Conclusion recovery: same saved-session re-read, but the engine
 // accepts the article when all three sections are present.
@@ -3146,7 +3179,7 @@ function runFreshRecovery(rows, label) {
     const slug = (item.rawInput || item.slug || '').trim();
     if (!slug || issueMap[slug] !== undefined) return;
     slugs.push(slug);
-    issueMap[slug] = parseAuditInfo(item.message).issuesText || '';
+    issueMap[slug] = parseAuditInfo(item.message).issuesText || gateRetryIssuesText(item);
   });
   if (!slugs.length) return showMsg('No ' + label + ' posts to rebuild.', 'err');
   const r = (typeof resolveRunConfig === 'function') ? resolveRunConfig() : { ok: false, error: 'config unavailable' };
@@ -4181,15 +4214,30 @@ function safetyGateJobFields(prompt) {
   };
 }
 
-// One line for the Start confirm dialog.
-function safetyGateSummary() {
+// One line for the Start confirm dialog, plus a warning line when the run
+// prompt is not made for the Safety Gate. `prompt` is the selected run prompt.
+function safetyGateSummary(prompt) {
   if (state.gateEnabled === 'off') return 'Safety Gate: OFF — AI edits are saved WITHOUT safety checks or fact check';
   let line = 'Safety Gate: ON' + (state.gateLinkCheck === 'off' ? ' (new links not tested)' : ' (new links tested)');
-  if (state.factCheck === 'off') return line + ' · Fact check: OFF';
-  const fcAi = state.factCheckAiId ? resolveAiFields(state.factCheckAiId) : null;
-  line += ' · Fact check: ON with ' + (fcAi ? fcAi.aiName : 'the same AI') +
-    (state.factCheckOnError === 'save' ? ' (saves anyway if the check breaks)' : ' (keeps the original if the check breaks)');
-  return line;
+  if (state.factCheck === 'off') {
+    line += ' · Fact check: OFF';
+  } else {
+    const fcAi = state.factCheckAiId ? resolveAiFields(state.factCheckAiId) : null;
+    line += ' · Fact check: ON with ' + (fcAi ? fcAi.aiName : 'the same AI') +
+      (state.factCheckOnError === 'save' ? ' (saves anyway if the check breaks)' : ' (keeps the original if the check breaks)');
+  }
+  // Prompts from before v3.46.0 have no end marker and web search Off, so the
+  // gate applies its strict no-research rules to them — say so up front.
+  const warn = [];
+  if (prompt && String(prompt.text || '').indexOf('APU-END') < 0) {
+    const sgEditor = state.prompts.find(p => p.id === SAFETY_GATE_PROMPTS[0].id && isRunPrompt(p));
+    warn.push('⚠ The prompt "' + (prompt.name || 'Untitled') + '" was not written for the Safety Gate (it has no <!-- APU-END --> end marker), so more posts may be blocked and end up in Failed.' +
+      (sgEditor && sgEditor.id !== prompt.id ? ' The "' + sgEditor.name + '" prompt is made for it.' : ''));
+  }
+  if (prompt && !prompt.webSearch) {
+    warn.push('⚠ Web search is OFF for this prompt: the Safety Gate blocks any new or removed price, percentage or year and any new "Last checked"/"updated" line, and removes new deep links. Tick "Allow AI web search with this prompt" if the prompt tells the AI to research.');
+  }
+  return line + (warn.length ? '\n' + warn.join('\n') : '');
 }
 
 // While the Safety Gate is Off the background skips the fact check too, so
