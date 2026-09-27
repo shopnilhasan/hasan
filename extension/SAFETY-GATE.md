@@ -13,7 +13,8 @@ The row goes to **❌ Failed posts** with the reason.
 - **Link test.** Every new link the AI added is opened once.
   A dead link is removed. Its words stay in the text.
 - **Two rule sets.** Prompts written for the Safety Gate get every check.
-  Your older prompts get the structure checks only (see section 4.1).
+  Your older prompts get the structure checks. Their price and date checks are dropped
+  only while the AI fact check is on and keeps the original when it breaks (see section 4.1).
 - **Retries say why.** When the batch retries a blocked post by itself,
   the new chat is told why the last edit was rejected (see section 5).
 - **AI fact check.** After the Safety Gate passes, a **new** chat compares the original and the edit.
@@ -87,8 +88,16 @@ Click **Load unpacked** and pick the folder that holds `manifest.json`.
 - **Affiliate posts**: keep your own affiliate prompts (for example the built-in "Single Amazon Product").
   They have no end marker, so the Safety Gate checks them with its **structure rules** (section 4.1).
   The Start box shows a note about this. That is expected.
-  Removing a price, adding a "Last updated" line or adding a new link to a live page is then **not** blocked.
-  Lost images, tables, links, shortcodes, blocks or text are still blocked.
+  With the fact check **On** and "Keep the original" when it breaks (the recommended setup above),
+  removing a price, adding a "Last updated" line or adding a new link to a live page is **not** blocked by code;
+  the fact check reads those changes.
+  But the built-in fact-check prompt is strict: it reports a lost price as lost information and a
+  "Last updated" line it cannot verify as an unverified claim, both serious. So such edits usually get a
+  fix round and then end as FACT CHECK BLOCKED (the original stays live, two extra chats were used).
+  If you want these posts updated, use an affiliate prompt that keeps prices and adds no "Last updated" line.
+  With the fact check **Off**, or set to "Save the edit anyway", nothing else would stop a made-up price,
+  so the code keeps its price and date rules: such an edit is then **blocked** (when web search is off for the prompt).
+  Lost images, tables, links, shortcodes, blocks or text are always blocked.
 - Optional, for your own prompts: add this sentence to the output part of the prompt:
   "The last line inside the code block must be `<!-- APU-END -->`."
   Then a cut-off reply is caught for those prompts too. The marker is never saved to WordPress.
@@ -136,19 +145,44 @@ The log says which rule set was used, on a line with "🛡 Gate rules".
 | Lost text (CONTENT_LOSS: at least 80% of the words) | checked | checked |
 | Rewritten text (CONTENT_RETENTION) | at least 75% of the original words kept | at least 60% kept (older "audit + fix" prompts rewrite more) |
 | New links | tested; dead, private, internal or forbidden links removed | the same |
-| Cut-off reply (END_MARKER_MISSING) | checked | not possible (no marker); the older completeness check catches most cut-offs |
-| No-research rules, when web search is **off** for the prompt: no new or removed prices, percentages or years, no new "Last checked" / "updated" line or today's date, new deep links removed | checked | **not checked** |
-| Older completeness check | its length part (85%) is skipped when the reply carries the end marker; its other parts stay (see below) | as before |
+| Cut-off reply (END_MARKER_MISSING) | checked: the marker must be the **last line** of the reply. A marker at the top or in the middle counts as missing | not possible (no marker); the older completeness check catches most cut-offs |
+| No-research rules, when web search is **off** for the prompt: no new or removed prices, percentages or years, no new "Last checked" / "updated" line or today's date, new deep links removed | checked | **not checked** while the fact check is On and keeps the original when it breaks; **checked** when the fact check is Off or set to "Save the edit anyway" |
+| Older completeness check | its length part (85%) can be skipped, see below; its other parts stay | as before |
 
 **Why.** Older affiliate prompts change prices and dates on purpose (for example the Amazon prompt removes prices
 and adds a "Last updated" line). With the strict no-research rules almost every such post would fail.
+So the code leaves these changes to the AI fact check, but only while that fact check keeps the original when it breaks.
+Without such a fact check nothing else would catch a made-up price, so the code keeps checking.
+The log line "🛡 Gate rules" says "structure rules" or "structure rules + research rules".
+
+**The rules follow the prompt that wrote the reply.** "↻ Retry AI session", "↻ Recover any code", the automatic
+HTML recovery and the Fast Submit recovery read an old chat. That chat is judged by the prompt it was sent with,
+not by the prompt you have selected now. A recovered reply that contains `<!-- APU-END -->` is always judged
+as a Safety Gate reply. "Recover any code" never skips the end-marker rule for such a reply.
 
 **Completeness and the end marker.** The older completeness check wants at least 85% of the original length.
 Cleaning up messy code (such as `<span style="...">` leftovers from Word or Google Docs) can make a complete edit shorter.
-So with the Safety Gate on, a Safety Gate prompt and the `<!-- APU-END -->` marker in the reply,
-a reply is no longer refused for its length alone. All other completeness checks stay.
-The Safety Gate still counts the **words** (CONTENT_LOSS, CONTENT_RETENTION), so real lost text is still blocked.
-The log then says "accepted because it carries the <!-- APU-END --> end marker".
+So, with the Safety Gate on and a Safety Gate prompt, a reply is not refused for its **length alone** when all of these are true:
+
+- the reply **ends** with `<!-- APU-END -->` (its last line);
+- at least 85% of the original's **readable text** is still there (tags, comments and schema do not count, so removed clutter does not matter, lost paragraphs do);
+- the original's **last section** is still there. The last section is the original's last H2/H3 heading or
+  FAQ question (for example "Conclusion", or the last question of an FAQ), with the text under it.
+  It counts as there when one of these is true:
+  - its heading or question is still a heading (or an FAQ accordion question) of the reply, with text under it;
+  - it is a concluding section ("Conclusion", "Final Thoughts", "The Bottom Line" ...) and the reply's last section
+    (a Sources list aside) has a new concluding heading, with text under it ("Conclusion" renamed "Final Thoughts");
+  - its own wording is still near the end of the reply: at least three runs of six words that appear nowhere
+    earlier in the original (the heading was reworded, the text kept). Words in a Key Takeaways, Quick Answer
+    or At a Glance box do not count.
+
+  One shared word is not enough. Entities such as `&nbsp;` (common in Word / Google Docs text) count as plain text.
+
+Otherwise the reply is refused as before, and the reason says why, for example
+"not waived for the <!-- APU-END --> end marker: the last section ("Conclusion") of the original is missing".
+A reply that stops before the original's last section and then writes the end marker is refused this way.
+All other completeness checks always stay. The Safety Gate also counts the words (CONTENT_LOSS, CONTENT_RETENTION).
+The log says "accepted because it ends with the <!-- APU-END --> end marker" when the length part was skipped.
 
 ## 5. Why a post failed, and what to do
 
@@ -162,9 +196,14 @@ Open the row in **❌ Failed posts** to see the reason.
   the new chat gets a short **PRIORITY FIX** note at the end of the prompt, for example:
   "Your previous edit of this exact article was REJECTED by the automatic Safety Gate ... IMG_COUNT — Image count changed:
   original 2, edited 1. Keep every image of the original exactly as it is ...".
-  Each retry gets only the reasons of the attempt just before it (at most about 3,000 characters).
-  Other failures (timeouts, no code box, FACT CHECK ERROR) get no note. Fast Submit (phase 1) never adds one.
+  Each retry gets the reasons of the **last** Safety Gate or fact-check block (at most about 3,000 characters).
+  A failure in between that has no reasons of its own (a timeout, no code box, FACT CHECK ERROR) keeps that note
+  ("↻ The retry keeps the previous PRIORITY FIX note"); before any block there is no note.
+  When the fact check's fix round is blocked by the Safety Gate, the note lists the gate reasons **and** the fact-check problems.
+  Fast Submit (phase 1) never adds a note. A post's note is forgotten once the post is saved or its last retry is done.
   The log shows "↻ The retry tells the AI why the previous edit was rejected".
+  If the AI copies the note into the article, the edit is blocked with PROMPT_ECHO: a sentence of the note,
+  a gate code name such as NUMBER_MISSING, or the words "PRIORITY FIX", in the text or in an image's alt text.
 - A real AI mistake: click **↻ Retry new** on the row. It starts a new chat and tells the AI what went wrong.
 - **↻ Retry AI session** and **↻ Recover any code** read the **same** reply again.
   They are only useful after you changed a setting (for example you allowed web search).
@@ -179,7 +218,8 @@ The message looks like: `SAFETY GATE BLOCKED: IMG_COUNT, LINK_MISSING — ... Th
 
 | Code | What it means | What to do |
 |---|---|---|
-| END_MARKER_MISSING | The reply did not end with `<!-- APU-END -->`. It was cut off, or the AI ignored the format. | Retry new. If it happens a lot with long posts, the reply is too long for one message. Try another model. |
+| END_MARKER_MISSING | The reply did not end with `<!-- APU-END -->`: the marker is missing, or it is somewhere else than the last line. The reply was cut off, or the AI ignored the format. | Retry new. If it happens a lot with long posts, the reply is too long for one message. Try another model. |
+| PROMPT_ECHO | The AI copied its PRIORITY FIX note (the reasons of an earlier rejection) into the article: a sentence of the note, a code name such as NUMBER_MISSING, or the words "PRIORITY FIX" (in the text, or in alt / title text). | Retry new. |
 | PARSE_EMPTY_HTML | No article HTML was found. | Retry new. |
 | STRAY_TEXT | Chat text got into the article ("Here is the edited article", "Hope this helps"). | Retry new. |
 | MARKDOWN | Markdown (`**bold**`, `## heading`) or ChatGPT citation marks (like `citeturn0search3`) in the article. | Retry new. |
@@ -247,11 +287,14 @@ The message looks like: `SAFETY GATE BLOCKED: IMG_COUNT, LINK_MISSING — ... Th
 | SECTION_DUPLICATED | A second FAQ, Sources list or Last checked line. | Retry new. |
 | NEW_FAQ_NOT_ALLOWED | A new FAQ was added, but "New FAQ section" is "No". | Retry new, or set it to Auto. |
 | LAST_CHECKED_NOT_ALLOWED | A "Last checked" line was added, but the prompt says no. | Retry new. |
-| NEW_NUMBER_WITHOUT_RESEARCH | Safety Gate prompt with web search off, but the AI added a new price, percentage or year. | Retry new. For informational posts, use a prompt with web search allowed. |
-| NUMBER_MISSING | Safety Gate prompt with web search off, but a price, percentage or year of the original is gone. | Retry new. |
-| LAST_CHECKED_WITHOUT_RESEARCH | Safety Gate prompt with web search off, but the AI added a "Last checked" / "updated" line or today's date. | Retry new. |
+| NEW_NUMBER_WITHOUT_RESEARCH | Web search is off for the prompt, but the AI added a new price, percentage or year. | Retry new. For informational posts, use a prompt with web search allowed. |
+| NUMBER_MISSING | Web search is off for the prompt, but a price, percentage or year of the original is gone. | Retry new. |
+| LAST_CHECKED_WITHOUT_RESEARCH | Web search is off for the prompt, but the AI added a "Last checked" / "updated" line or today's date. | Retry new. |
 
-These three codes never appear for older prompts (section 4.1).
+For older prompts these three codes appear only when the fact check is Off or set to "Save the edit anyway" (section 4.1).
+If your affiliate prompt removes prices or adds a "Last updated" line on purpose, switching the fact check On
+with "Keep the original" stops these three codes, but the built-in fact check usually blocks such edits too
+(section 3, "Affiliate posts").
 
 **Rare technical codes**
 
@@ -314,15 +357,18 @@ such a post is saved after the Safety Gate passed. Its row in Successful shows "
 Messages without these three prefixes come from the older checks, the same as in v3.45.0:
 for example a cut-off reply ("sections look missing", "only 74% of the source length"),
 no code block, or report text in the reply. Retry new.
-("only …% of the source length" no longer happens with a Safety Gate prompt when the reply carries the end marker, section 4.1.)
+(With a Safety Gate prompt, "only …% of the source length" no longer blocks a reply that ends with the end marker
+and only lost messy code, section 4.1. A reply that lost text, or stopped before the original's last section,
+is still blocked, even when it ends with the marker.)
 
 ## 6. Known limits
 
 - **Not tested on the live ChatGPT website.** All tests used local copies of ChatGPT-like pages
   and a fake WordPress. Real pages change often. Start with Test First Post and a small batch.
 - **More posts in Failed.** The checks are strict on purpose. Failed posts count toward "stop after N failures in a row".
-- **Older prompts get fewer checks.** Without the end marker the code does not check prices, dates or "Last updated" lines
-  (section 4.1). A cut-off reply is then caught only by the older completeness checks. The fact check still reads the edit.
+- **Older prompts get fewer checks.** Without the end marker, and while the fact check is On with "Keep the original",
+  the code does not check prices, dates or "Last updated" lines; the fact check reads them (section 4.1).
+  A cut-off reply is then caught only by the older completeness checks.
 - **Slower and uses more of your AI limit.** One more chat per post, sometimes two.
 - **The link test cannot see pages that block robots** (403, 429, Cloudflare checks).
   A new deep link to such a page is removed (the words stay). Homepages are kept.
@@ -341,9 +387,21 @@ no code block, or report text in the reply. Retry new.
 - **Auto-split (experimental):** the Safety Gate checks the joined article.
   A cut-off middle part is caught only by the length and section checks.
 - **The completeness check** (Balanced: at least 85% of the length) can still block an edit that removed a lot
-  of messy code, such as `<span>` leftovers from Word or Google Docs, when the prompt is an older prompt
-  or the reply has no end marker. With a Safety Gate prompt and the marker, the length alone no longer blocks it.
+  of messy code, such as `<span>` leftovers from Word or Google Docs, when the prompt is an older prompt,
+  the reply does not end with the end marker, or the original's last section was rewritten completely
+  (both its heading or question AND its wording, for example the last FAQ question and its answer both reworded).
+  That is on purpose: the code cannot tell such a rewrite from a reply that stopped early. Retry new.
+  A reply that stops in the middle of the last section (heading and at least a quarter of its text there)
+  and ends with the marker is not caught by this test; the Safety Gate's lost-words check (CONTENT_LOSS) still applies.
   The re-joined article of Auto-split keeps the full length check.
+- **The post-save audit** (report only, unchanged since v3.45.0) still lists a renamed "Conclusion"
+  (for example "Final Thoughts") as a missing section. The post is saved; its row is shown under Audit Issues,
+  and with an audit retry (or HTML recovery for audit issues) turned on, the post is read or edited once more.
+- **PROMPT_ECHO does not read HTML comments.** A note copied into a `<!-- comment -->` is not shown on the page
+  and is not blocked.
+- **Older affiliate prompts with the fact check On:** the code leaves prices and "Last updated" lines to the fact
+  check, and the built-in fact-check prompt usually blocks such changes (section 3). The tests use a fake
+  fact check that always passes, so this was not tested with the real ChatGPT.
 - **The editor prompt is long** (about 58,000 characters). With a very long article the reply may not fit.
   Then END_MARKER_MISSING blocks the post (safe, but not updated).
 - **The reference original** is the earliest backup of this run (the extension keeps the last 300 backups).

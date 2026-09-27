@@ -1003,9 +1003,14 @@ describe('Safety Gate options, backups, tabs, links (review fixes)', () => {
     c.__run('runtime.job.prompt = "Edit it. End with <!-- APU-END -->."');
     await assert.rejects(c.runSafetyGateStep({ tag: '[t]', attemptLinks: { postTitle: 'Other title' } }, original, dated + '\n' + END, 'AI'),
       (e) => e.code === 'SAFETY_GATE' && /LAST_CHECKED_WITHOUT_RESEARCH/.test(e.message));
-    // ... not to other prompts (structure rules only)
+    // ... not to other prompts while a fail-closed fact check stands behind the gate (structure rules only) ...
     c.__run('runtime.job.prompt = "Edit it."');
+    c.__run('runtime.job.factCheck = true; runtime.job.factCheckOnError = "keep"');
     assert.equal(await c.runSafetyGateStep({ tag: '[t]', attemptLinks: { postTitle: 'Other title' } }, original, dated, 'AI'), dated.trim());
+    // ... but again to every prompt when the fact check is off (v3.46.0)
+    c.__run('runtime.job.factCheck = false');
+    await assert.rejects(c.runSafetyGateStep({ tag: '[t]', attemptLinks: { postTitle: 'Other title' } }, original, dated, 'AI'),
+      (e) => e.code === 'SAFETY_GATE' && /LAST_CHECKED_WITHOUT_RESEARCH/.test(e.message));
   });
 
   const siteBackups = [
@@ -1227,10 +1232,10 @@ describe('Stop, limits and copy capture (review fixes)', () => {
 describe('rule sets per prompt type (Safety Gate prompt vs legacy prompt)', () => {
   const AMAZON = panelDefaultPrompts().DEFAULT_PROMPTS.find((p) => p.id === 'p_single_amazon');
 
-  test('runSafetyGateStep: full rules for a Safety Gate prompt, structure rules (and 60% retention) for any other prompt', async () => {
+  test('runSafetyGateStep: full rules for a Safety Gate prompt; structure rules (and 60% retention) for any other prompt, research rules only while no fail-closed fact check is behind the gate', async () => {
     assert.ok(AMAZON && AMAZON.text.indexOf('APU-END') < 0, 'the built-in Amazon prompt has no end marker');
     const c = loadBackground();
-    gateJob(c, { promptWebSearch: false, gateLinkCheck: false });
+    gateJob(c, { promptWebSearch: false, gateLinkCheck: false, factCheck: true, factCheckOnError: 'keep' });
     const seen = [];
     const real = c.SafetyGate.runSafetyGate;
     c.SafetyGate = Object.assign({}, c.SafetyGate, { runSafetyGate: (r, h, o) => { seen.push(o); return real(r, h, o); } });
@@ -1241,6 +1246,7 @@ describe('rule sets per prompt type (Safety Gate prompt vs legacy prompt)', () =
     assert.equal(seen[0].webSearchAllowed, false);
     assert.equal('minRetention' in seen[0], false, 'Safety Gate prompts keep the validator default (75%)');
     assert.ok(c.__logs().some((l) => l === 'info [t] 🛡 Gate rules: full rules — Safety Gate prompt.'), c.__logs().join('\n'));
+    // a legacy prompt with the fact check ON and "keep the original" when it breaks: structure rules only
     c.__run('runtime.job.prompt = ' + JSON.stringify(AMAZON.text));
     assert.equal(c.promptRequiresEndMarker(), false);
     await c.runSafetyGateStep({ tag: '[t]', attemptLinks: {} }, ORIG_BLOCK, GOOD_BLOCK, 'AI');
@@ -1248,13 +1254,34 @@ describe('rule sets per prompt type (Safety Gate prompt vs legacy prompt)', () =
     assert.equal(seen[1].requireEndMarker, false);
     assert.equal(seen[1].minRetention, 0.6);
     assert.equal(c.LEGACY_PROMPT_MIN_RETENTION, undefined, 'a top-level const, not a context property');
-    assert.ok(c.__logs().some((l) => /^info \[t\] 🛡 Gate rules: structure rules — this prompt is not a Safety Gate prompt \(no <!-- APU-END --> end marker\).*word-retention minimum 60%\.$/.test(l)), c.__logs().join('\n'));
+    assert.ok(c.__logs().some((l) => /^info \[t\] 🛡 Gate rules: structure rules — this prompt is not a Safety Gate prompt \(no <!-- APU-END --> end marker\): prices, dates and "Last updated" lines are not checked by code \(the AI fact check reviews them\), word-retention minimum 60%\.$/.test(l)), c.__logs().join('\n'));
+    // fact check OFF: no second line of defence, so the code keeps the research rules
+    c.__run('runtime.job.factCheck = false');
+    await c.runSafetyGateStep({ tag: '[t]', attemptLinks: {} }, ORIG_BLOCK, GOOD_BLOCK, 'AI');
+    assert.equal(seen[2].researchRules, true);
+    assert.equal(seen[2].requireEndMarker, false);
+    assert.equal(seen[2].minRetention, 0.6);
+    assert.ok(c.__logs().some((l) => /^info \[t\] 🛡 Gate rules: structure rules \+ research rules — this prompt is not a Safety Gate prompt \(no <!-- APU-END --> end marker\), but the fact check is off, so prices, dates and "Last updated" lines are still checked by code, word-retention minimum 60%\.$/.test(l)), c.__logs().join('\n'));
+    // fact check ON but "save anyway" when it breaks: not fail-closed either
+    c.__run('runtime.job.factCheck = true; runtime.job.factCheckOnError = "save"');
+    await c.runSafetyGateStep({ tag: '[t]', attemptLinks: {} }, ORIG_BLOCK, GOOD_BLOCK, 'AI');
+    assert.equal(seen[3].researchRules, true);
+    assert.ok(c.__logs().some((l) => /research rules — .*but the fact check saves the edit when it breaks, so prices/.test(l)), c.__logs().join('\n'));
+    c.__run('runtime.job.factCheckOnError = "keep"');
+    // detection is case-insensitive
+    c.__run('runtime.job.prompt = "Edit it. The last line must be <!-- apu-end -->."');
+    assert.equal(c.promptRequiresEndMarker(), true);
+    await c.runSafetyGateStep({ tag: '[t]', attemptLinks: {} }, ORIG_BLOCK, GOOD_BLOCK + '\n<!-- apu-end -->', 'AI');
+    assert.equal(seen[4].researchRules, true);
+    assert.equal(seen[4].requireEndMarker, true);
   });
 
-  test('a legacy affiliate edit (price removed, "Last updated" line, new live deep link) is saved; the same edit is blocked for a Safety Gate prompt; images stay protected', async () => {
+  test('a legacy affiliate edit (price removed, "Last updated" line, new live deep link) is saved with a fail-closed fact check; blocked with the fact check off / "save anyway" and for a Safety Gate prompt; images stay protected', async () => {
     const fetched = [];
     const c = loadBackground({ fetch: async (url, init) => { fetched.push(url); return { status: 200, ok: true, url }; } });
-    gateJob(c, { site: { url: 'https://getcostidea.com/', name: 'Get Cost Idea' }, prompt: AMAZON.text, promptWebSearch: false });
+    gateJob(c, { site: { url: 'https://getcostidea.com/', name: 'Get Cost Idea' }, prompt: AMAZON.text, promptWebSearch: false, factCheck: true, factCheckOnError: 'keep' });
+    const factChecks = [];
+    c.runFactCheck = async (x) => { factChecks.push(x.editedHtml); return { verdict: 'pass', effectiveVerdict: 'pass', action: 'pass', issues: [], dropped: [], retryIssues: [], aiSessionUrl: '' }; };
     const DEEP = 'https://www.sherwin-williams.com/en-us/color/paint-calculator';
     const edit = GOOD_CLASSIC.split('before 1978').join('long ago').replace('<h2>Should You Paint',
       '<p><em>Last updated: ' + c.localDateYmd() + '</em></p>\n<p>Use a <a href="' + DEEP + '">paint calculator</a> before you buy.</p>\n<h2>Should You Paint');
@@ -1263,13 +1290,24 @@ describe('rule sets per prompt type (Safety Gate prompt vs legacy prompt)', () =
       attemptLinks: { rawInput: 'paint-cost' }, attemptTabs: { edit: null, ai: null }, wpItem: { title: 'How Much Does It Cost to Paint a Room?' } });
     const saved = await c.applySafetyPipeline(ctx(edit));
     assert.equal(saved, edit);
+    assert.deepEqual(factChecks, [edit], 'the AI fact check reviewed the edit');
     assert.ok(saved.includes('<a href="' + DEEP + '">paint calculator</a>'), 'the live deep link is kept');
     assert.ok(fetched.includes(DEEP), 'the new deep link was link-checked');
     // a dead deep link is still unwrapped (the words stay)
     const d = loadBackground({ fetch: async (url) => ({ status: url === DEEP ? 404 : 200, ok: url !== DEEP, url }) });
-    gateJob(d, { site: { url: 'https://getcostidea.com/', name: 'Get Cost Idea' }, prompt: AMAZON.text, promptWebSearch: false });
+    gateJob(d, { site: { url: 'https://getcostidea.com/', name: 'Get Cost Idea' }, prompt: AMAZON.text, promptWebSearch: false, factCheck: true });
+    d.runFactCheck = c.runFactCheck;
     const savedDead = await d.applySafetyPipeline(ctx(edit));
     assert.ok(!savedDead.includes(DEEP) && savedDead.includes('Use a paint calculator before you buy.'));
+    // no fail-closed fact check behind the gate: the research rules block the same edit
+    for (const setup of ['runtime.job.factCheck = false', 'runtime.job.factCheck = true; runtime.job.factCheckOnError = "save"']) {
+      c.__run(setup);
+      const noFc = ctx(edit);
+      await assert.rejects(c.applySafetyPipeline(noFc), (e) => e.code === 'SAFETY_GATE', setup);
+      const got = plain(noFc.attemptLinks.gate.codes);
+      for (const code of ['LAST_CHECKED_WITHOUT_RESEARCH', 'NUMBER_MISSING']) assert.ok(got.includes(code), setup + ': ' + got.join(','));
+    }
+    c.__run('runtime.job.factCheck = true; runtime.job.factCheckOnError = "keep"');
     // the same edit under a Safety Gate prompt (end marker added): research rules block it
     c.__run('runtime.job.prompt = ' + JSON.stringify(EDITOR_PROMPT));
     const gateCtx = ctx(edit + '\n' + END);
@@ -1341,24 +1379,40 @@ describe('automatic retries carry the gate / fact-check reasons (PRIORITY FIX no
     assert.equal(c.retryNoteLabel(err), 'fact check: 2 issue(s)');
   });
 
-  test('applyRetryFixNote: the note is replaced on every retry (never added up); an audit-fix note stays in front; recovery reads get none', () => {
+  test('applyRetryFixNote: the note is replaced on every retry (never added up); a failure without a note keeps the last one; an audit-fix note stays in front; recovery reads get none', () => {
     const c = loadBackground();
     gateJob(c);
     const links = {};
+    c.applyRetryFixNote(links, '', new Error('AI timed out'), '[1/1]');
+    assert.equal('auditFixNote' in links, false, 'no note before any gate block');
     c.applyRetryFixNote(links, '', gateErr(c, ['IMG_COUNT'], ['Image count changed: original 2, edited 1.']), '[1/1]');
     assert.match(links.auditFixNote, /IMG_COUNT/);
     c.applyRetryFixNote(links, '', gateErr(c, ['TABLE_LOSS'], ['Table content lost.']), '[1/1]');
     assert.match(links.auditFixNote, /TABLE_LOSS/);
     assert.doesNotMatch(links.auditFixNote, /IMG_COUNT/);
     assert.equal((links.auditFixNote.match(/Your previous edit/g) || []).length, 1);
+    // v3.46.0: a failure that has no note of its own (timeout, INTERNAL_ERROR) keeps the last reasons
+    const tableNote = links.auditFixNote;
     c.applyRetryFixNote(links, '', new Error('AI timed out'), '[1/1]');
-    assert.equal('auditFixNote' in links, false, 'a non-gate failure clears the note');
+    assert.equal(links.auditFixNote, tableNote, 'a non-gate failure keeps the note');
+    c.applyRetryFixNote(links, '', gateErr(c, ['INTERNAL_ERROR'], ['the Safety Gate crashed: boom']), '[1/1]');
+    assert.equal(links.auditFixNote, tableNote, 'a gate failure the AI cannot fix keeps the note');
+    assert.ok(c.__logs().some((l) => l === 'info [1/1] ↻ The retry keeps the previous PRIORITY FIX note (Safety Gate: TABLE_LOSS) — the last failure added no new reasons.'), c.__logs().join('\n'));
+    // success clears it (setRetryFixNote with no note)
+    c.setRetryFixNote(links, '', '');
+    assert.equal('auditFixNote' in links, false);
+    assert.equal('retryNote' in links, false);
+    c.applyRetryFixNote(links, '', new Error('AI timed out'), '[1/1]');
+    assert.equal('auditFixNote' in links, false, 'nothing to keep after a success');
     const base = c.buildAuditFixNote('FAQ missing');
     c.applyRetryFixNote(links, base, gateErr(c, ['IMG_COUNT'], ['x']), '');
     assert.ok(links.auditFixNote.startsWith(base + '\n\nYour previous edit'));
     c.applyRetryFixNote(links, base, gateErr(c, ['IMG_COUNT'], ['x']), '');
     assert.equal(links.auditFixNote.split(base).length, 2, 'the audit-fix note appears once');
+    const withImg = links.auditFixNote;
     c.applyRetryFixNote(links, base, new Error('timeout'), '');
+    assert.equal(links.auditFixNote, withImg, 'the audit-fix note + the kept note');
+    c.setRetryFixNote(links, base, '');
     assert.equal(links.auditFixNote, base);
     const rec = { recoverFromUrl: 'https://chatgpt.com/c/00000000-0000-4000-8000-000000000000' };
     assert.equal(c.applyRetryFixNote(rec, '', gateErr(c, ['IMG_COUNT'], ['x']), ''), '');
@@ -1400,20 +1454,22 @@ describe('automatic retries carry the gate / fact-check reasons (PRIORITY FIX no
     return notes;
   };
 
-  test('processLoop, inline retries: each retry carries the reasons of the attempt before it; a non-gate failure sends none', async () => {
-    const c = loopCtx({ retryMode: 'inline', maxRetries: 3 });
+  test('processLoop, inline retries: each retry carries the reasons of the last gate block; a non-gate failure keeps them', async () => {
+    const c = loopCtx({ retryMode: 'inline', maxRetries: 4 });
     const notes = failThenPass(c, [
+      () => new Error('AI timed out'),
       (l) => c.safetyGateBlockedError(l, ['IMG_COUNT'], ['Image count changed: original 2, edited 1.'], [], []),
       () => new Error('AI finished without returning the article'),
       (l) => c.safetyGateBlockedError(l, ['TABLE_LOSS'], ['Table content lost.'], [], [])
     ]);
     await c.processLoop();
-    assert.equal(notes.length, 4);
+    assert.equal(notes.length, 5);
     assert.equal(notes[0], '');
-    assert.match(notes[1], /^Your previous edit .*\n1\. IMG_COUNT — /s);
-    assert.equal(notes[2], '', 'after a non-gate failure the next try has no note');
-    assert.match(notes[3], /TABLE_LOSS/);
-    assert.doesNotMatch(notes[3], /IMG_COUNT/);
+    assert.equal(notes[1], '', 'no note after a first non-gate failure');
+    assert.match(notes[2], /^Your previous edit .*\n1\. IMG_COUNT — /s);
+    assert.equal(notes[3], notes[2], 'after a non-gate failure the next try keeps the IMG_COUNT reasons');
+    assert.match(notes[4], /TABLE_LOSS/);
+    assert.doesNotMatch(notes[4], /IMG_COUNT/);
     assert.equal(c.__run('runtime.successes'), 1);
   });
 
@@ -1534,11 +1590,12 @@ describe('end-marker-aware completeness (assessReplyCompleteness)', () => {
     assert.equal(c.assessReplyCompleteness(withMarker, orig, opts).complete, false);
     c.__run('runtime.job.prompt = ' + JSON.stringify(EDITOR_PROMPT));
     assert.equal(c.assessReplyCompleteness(withMarker, orig, opts).complete, true);
-    // unclosed containers are still a reason, marker or not
+    // unclosed containers are still a reason, marker or not — and then nothing is waived
     const unclosed = c.assessReplyCompleteness('<div><section><ul>' + edit + END, orig, opts);
     assert.equal(unclosed.complete, false);
     assert.match(plain(unclosed.reasons).join(' '), /unclosed container/);
-    assert.ok(!/% of the source length/.test(plain(unclosed.reasons).join(' ')));
+    assert.match(plain(unclosed.reasons).join(' '), /% of the source length/);
+    assert.notEqual(unclosed.coverageWaived, true);
     // a full-length reply is not "waived"
     assert.equal(c.assessReplyCompleteness(orig + END, orig, opts).coverageWaived, false);
   });
@@ -1551,6 +1608,630 @@ describe('end-marker-aware completeness (assessReplyCompleteness)', () => {
     assert.equal(direct.filter((l) => /joinedAssess/.test(l)).length, 1);
     const helper = src.split('\n').filter((l) => /assessReplyCompleteness\(/.test(l) && !/^function /.test(l));
     assert.equal(helper.length, 8, 'waitForAIResponse (2), copy button, continuation (2), recovery, API, final web check');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Review fixes of the legacy-prompt round (end marker at the END, waiver
+// limits, research rules without a fail-closed fact check, PROMPT_ECHO,
+// leak samples, rule set of the producing prompt, retry-note gaps)
+// ──────────────────────────────────────────────────────────────────────
+const E2E = require('./e2e/server');
+
+describe('end marker must be the LAST line (reply completeness + gate)', () => {
+  const NOTE_OPTS = { siteDomains: ['wp.e2e.test'], checkLinks: false, endMarker: 'APU-END', requireEndMarker: true };
+
+  test('replyEndsWithEndMarker agrees with the gate\'s endsWithEndMarker', () => {
+    const c = loadBackground();
+    const G = c.SafetyGate;
+    assert.equal(typeof G.endsWithEndMarker, 'function');
+    const samples = [
+      GOOD_BLOCK + '\n' + END, GOOD_BLOCK + '\n' + END + '\n\n', GOOD_BLOCK + '\n' + END + '\n```', GOOD_BLOCK + '\n<!--apu-end-->',
+      END + '\n' + GOOD_BLOCK, GOOD_BLOCK.replace('</p>', '</p>\n' + END), '<!-- last line: ' + END + ' -->\n' + GOOD_BLOCK,
+      GOOD_BLOCK + '\n' + END + '\n</div>', GOOD_BLOCK + '\n' + END + ' Done!', GOOD_BLOCK, '', GOOD_BLOCK + '\n<!-- APU-ENDING -->'
+    ];
+    const want = [true, true, true, true, false, false, false, false, false, false, false, false];
+    samples.forEach((h, i) => {
+      assert.equal(c.replyEndsWithEndMarker(h), want[i], 'background #' + i);
+      assert.equal(G.endsWithEndMarker(h, 'APU-END'), want[i], 'gate #' + i);
+    });
+  });
+
+  test('S90 port: a reply cut before the Conclusion with the marker at the TOP is incomplete and blocked by the gate', async () => {
+    const c = loadBackground();
+    gateJob(c);
+    const reply = END + '\n' + E2E.CUT_REPLY;
+    const r = c.assessReplyCompleteness(reply, E2E.CUT_ORIGINAL, c.completenessOptions());
+    assert.equal(r.complete, false);
+    assert.equal(r.coverageWaived, false);
+    assert.match(plain(r.reasons).join('; '), /^only 70% of the source length/);
+    // other marker positions in the middle: the same
+    for (const h of [E2E.CUT_REPLY.replace('<!-- /wp:paragraph -->', '<!-- /wp:paragraph -->\n' + END), '<!-- last line: ' + END + ' -->\n' + E2E.CUT_REPLY]) {
+      assert.equal(c.assessReplyCompleteness(h, E2E.CUT_ORIGINAL, c.completenessOptions()).complete, false);
+    }
+    // even if a later step let it through, the gate says END_MARKER_MISSING (marker not at the end)
+    const links = { rawInput: 'x' };
+    await assert.rejects(c.runSafetyGateStep({ tag: '[t]', attemptLinks: links }, E2E.CUT_ORIGINAL, reply, 'AI'),
+      (e) => e.code === 'SAFETY_GATE' && /END_MARKER_MISSING — The end marker <!-- APU-END --> is not at the end of the reply/.test(e.message));
+    // API mode (the same helper decides): refused before the gate
+    gateJob(c, { aiMode: 'openai', aiProvider: 'openai', aiName: 'API' });
+    c.callAIProviderAPI = async () => ({ text: '```html\n' + reply + '\n```' });
+    await assert.rejects(c.generateHtmlForArticle('[1/1]', 1, 1, E2E.CUT_ORIGINAL, { rawInput: 'x' }, { edit: null, ai: null }, 4),
+      /AI API result looks incomplete and was NOT saved \(only 70% of the source length/);
+  });
+
+  test('S92 port: marker as the last line but the Conclusion (the original\'s last section) is missing: not waived', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const r = c.assessReplyCompleteness(E2E.CUT_REPLY + '\n' + END, E2E.CUT_ORIGINAL, c.completenessOptions());
+    assert.equal(r.complete, false);
+    assert.equal(r.coverageWaived, false);
+    const why = plain(r.reasons).join('; ');
+    assert.match(why, /^only 70% of the source length .*; not waived for the <!-- APU-END --> end marker: the last section \("Conclusion"\) of the original is missing$/);
+  });
+
+  test('the waiver needs the readable text too: markup clean-up passes, lost paragraphs do not', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const opts = c.completenessOptions();
+    // S19: span clutter removed, every word kept → waived
+    const s19 = c.assessReplyCompleteness(E2E.GOOD_EDIT + '\n' + END, E2E.SPANS_ORIGINAL, opts);
+    assert.equal(s19.complete, true, plain(s19.reasons).join('; '));
+    assert.equal(s19.coverageWaived, true);
+    assert.ok(s19.textCoverage > 0.99, String(s19.textCoverage));
+    assert.equal(s19.lastSection, 'Conclusion');
+    // S1: a normal edit needs no waiver
+    const s1 = c.assessReplyCompleteness(E2E.GOOD_EDIT + '\n' + END, E2E.ORIGINAL_HTML, opts);
+    assert.equal(s1.complete, true);
+    assert.equal(s1.coverageWaived, false);
+    // middle paragraphs dropped, Conclusion kept, marker at the end → only the text is short
+    const paras = E2E.GOOD_EDIT.split('\n\n');
+    const thin = paras.filter((p, i) => !(i > 2 && i < paras.length - 6 && /wp:paragraph|wp:list |wp:table/.test(p))).join('\n\n');
+    const r = c.assessReplyCompleteness(thin + '\n' + END, E2E.SPANS_ORIGINAL, opts);
+    assert.equal(r.complete, false);
+    assert.match(plain(r.reasons).join('; '), /not waived for the <!-- APU-END --> end marker: only \d+% of the source text$/);
+    // comments / schema do not count as text
+    assert.equal(c.readableArticleText('<!-- wp:paragraph --><p>A b</p><!-- /wp:paragraph --><script type="application/ld+json">{"x":"long long text"}</script>'), 'a b');
+    // the last H2/H3 heading or FAQ question, not an H4 or the title
+    assert.equal(c.lastSectionOf('<h1>T</h1><h2>One</h2><h3>Two</h3><h4>Three</h4>').heading, 'Two');
+    assert.equal(c.lastSectionOf('<h2>FAQ</h2><details><summary>Why &amp; <b>how</b>?</summary><p>x</p></details>').heading, 'Why & how ?');
+    assert.equal(c.lastSectionOf('<p>No headings</p>'), null);
+  });
+
+  test('S1 and S19 edits still pass the whole gate pipeline', async () => {
+    const c = loadBackground();
+    gateJob(c, { gateSiteDomains: ['wp.e2e.test'], gateLinkCheck: false, promptWebSearch: true });
+    const ctx = (orig, html) => ({ slug: 's', tag: '[1/1]', num: 1, total: 1, originalHtml: orig, aiHtml: html,
+      attemptLinks: { rawInput: 's' }, attemptTabs: { edit: null, ai: null }, wpItem: { title: 'How to Care for Cast Iron' } });
+    assert.equal(await c.applySafetyPipeline(ctx(E2E.ORIGINAL_HTML, E2E.GOOD_EDIT + '\n' + END)), E2E.GOOD_EDIT.trim());
+    assert.equal(await c.applySafetyPipeline(ctx(E2E.SPANS_ORIGINAL, E2E.GOOD_EDIT + '\n' + END)), E2E.GOOD_EDIT.trim());
+    void NOTE_OPTS;
+  });
+});
+
+describe('PROMPT_ECHO: the AI pasted its PRIORITY FIX note into the article', () => {
+  const gateErr = (c, codes, messages) => c.safetyGateBlockedError({}, codes, messages, [], []);
+  const withPara = (html, text) => html.replace('<!-- /wp:paragraph -->', '<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>' + text + '</p>\n<!-- /wp:paragraph -->');
+
+  test('findPromptEcho: fixed sentences only (banner, head / foot lines, used hints); never the variable parts or text of the original', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const note = c.buildGateRetryNote(gateErr(c, ['IMG_COUNT'], ['Image count changed: original 2, edited 1.']));
+    const noteLines = note.split('\n');
+    assert.equal(c.findPromptEcho(GOOD_BLOCK, ORIG_BLOCK, note), '');
+    // the head sentence as a paragraph (r3_echo.js)
+    const head = withPara(GOOD_BLOCK, noteLines[0]);
+    assert.match(c.findPromptEcho(head, ORIG_BLOCK, note), /^.{60}$/);
+    assert.ok(c.findPromptEcho(head, ORIG_BLOCK, '') !== '', 'the head / foot lines count even without the note');
+    // the whole note, HTML-escaped, curly quotes
+    const whole = withPara(GOOD_BLOCK, note.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/'/g, '’').replace(/\n/g, ' '));
+    assert.notEqual(c.findPromptEcho(whole, ORIG_BLOCK, note), '');
+    // the foot line alone; the banner alone
+    assert.notEqual(c.findPromptEcho(withPara(GOOD_BLOCK, noteLines[noteLines.length - 1]), ORIG_BLOCK, note), '');
+    assert.notEqual(c.findPromptEcho(withPara(GOOD_BLOCK, c.__run('PRIORITY_FIX_BANNER')), ORIG_BLOCK, note), '');
+    // a hint counts only when the note used it
+    const imgHint = c.gateRetryHint('IMG_COUNT');
+    assert.notEqual(c.findPromptEcho(withPara(GOOD_BLOCK, imgHint), ORIG_BLOCK, note), '');
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, imgHint), ORIG_BLOCK, ''), '');
+    // shorter than 60 characters: fine
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, 'Your previous edit of this exact article was rejected.'), ORIG_BLOCK, note), '');
+    // the same sentence in the original: not an echo
+    assert.equal(c.findPromptEcho(head, withPara(ORIG_BLOCK, noteLines[0]), note), '');
+    // an HTML comment is not visible text
+    assert.equal(c.findPromptEcho(GOOD_BLOCK + '\n<!-- ' + noteLines[0] + ' -->', ORIG_BLOCK, note), '');
+    // variable parts (a fact-check quote / problem = a sentence the retry restores) never count
+    const lost = 'Always check the pressure when the tyres are cold, before you drive more than a mile, because warm air expands.';
+    const fcNote = c.buildGateRetryNote(c.factCheckBlockedError({ verdict: 'fix', issues: [], retryIssues: [
+      { severity: 'high', category: 'info_lost', quote: 'Use a good gauge', problem: lost, fix: 'Restore: ' + lost }] }, false, ''));
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, lost), ORIG_BLOCK, fcNote), '');
+    assert.notEqual(c.findPromptEcho(withPara(GOOD_BLOCK, fcNote.split('\n')[0]), ORIG_BLOCK, fcNote), '');
+    // the audit-fix note and the fact-check fix-round note
+    const audit = c.buildAuditFixNote('FAQ missing');
+    assert.notEqual(c.findPromptEcho(withPara(GOOD_BLOCK, audit), ORIG_BLOCK, audit), '');
+    const fixNote = c.buildFactCheckFixNote([{ severity: 'high', problem: 'x' }]);
+    assert.notEqual(c.findPromptEcho(withPara(GOOD_BLOCK, fixNote.split('\n')[0]), ORIG_BLOCK, fixNote), '');
+    // fast on a big article
+    const big = GOOD_BLOCK.repeat(60);
+    const t0 = Date.now();
+    assert.equal(c.findPromptEcho(big, ORIG_BLOCK.repeat(60), note + '\n' + audit), '');
+    assert.ok(Date.now() - t0 < 1500, (Date.now() - t0) + ' ms');
+  });
+
+  test('applySafetyPipeline blocks the echo as SAFETY_GATE / PROMPT_ECHO; the next note says what to do; the fix-round edit is checked against its note', async () => {
+    const c = loadBackground();
+    gateJob(c, { gateLinkCheck: false, promptWebSearch: true });
+    const note = c.buildGateRetryNote(gateErr(c, ['IMG_COUNT'], ['Image count changed: original 2, edited 1.']));
+    const ctx = (html, links) => ({ slug: 's', tag: '[1/1]', num: 1, total: 1, originalHtml: ORIG_BLOCK, aiHtml: html,
+      attemptLinks: Object.assign({ rawInput: 's' }, links || {}), attemptTabs: { edit: null, ai: null }, wpItem: { title: 'x' } });
+    // the good edit with the note attached passes
+    assert.equal(await c.applySafetyPipeline(ctx(GOOD_BLOCK + '\n' + END, { auditFixNote: note })), GOOD_BLOCK);
+    const echo = ctx(withPara(GOOD_BLOCK, note.split('\n')[0]) + '\n' + END, { auditFixNote: note });
+    await assert.rejects(c.applySafetyPipeline(echo), (e) => {
+      assert.equal(e.code, 'SAFETY_GATE');
+      assert.match(e.message, /^SAFETY GATE BLOCKED: PROMPT_ECHO — The article repeats text of the PRIORITY FIX note sent with the prompt \("your previous edit of this exact article/);
+      const next = c.buildGateRetryNote(e);
+      assert.match(next, /1\. PROMPT_ECHO — .*Never copy this PRIORITY FIX note or any other instruction into the article/);
+      return true;
+    });
+    assert.deepEqual(plain(echo.attemptLinks.gate.codes), ['PROMPT_ECHO']);
+    assert.ok(c.__logs().some((l) => /Gate error — PROMPT_ECHO: The article repeats text/.test(l)));
+    // fix round: its edit is checked against the fix note it was sent with
+    c.__run('runtime.job.factCheck = true');
+    let calls = 0;
+    c.runFactCheck = async () => (++calls === 1
+      ? { verdict: 'fix', action: 'fix', issues: [{ severity: 'high', category: 'fact_wrong', quote: 'x', problem: 'Wrong.', fix: 'Remove it.' }], dropped: [], retryIssues: [], aiSessionUrl: '' }
+      : { verdict: 'pass', action: 'pass', issues: [], dropped: [], retryIssues: [], aiSessionUrl: '' });
+    let fixNote = '';
+    c.regenerateForFactCheckFix = async (x, ref, n) => { fixNote = n; return withPara(GOOD_BLOCK, n.split('\n')[0]) + '\n' + END; };
+    const fr = ctx(GOOD_BLOCK + '\n' + END);
+    await assert.rejects(c.applySafetyPipeline(fr), (e) => e.code === 'SAFETY_GATE' && /PROMPT_ECHO/.test(e.message));
+    assert.match(fixNote, /^A fact-check of your previous edit/);
+  });
+
+  test('PROMPT_ECHO has a retry hint and the note builders use the shared fixed sentences', () => {
+    const c = loadBackground();
+    assert.notEqual(c.gateRetryHint('PROMPT_ECHO'), 'Fix this problem.');
+    const T = c.__run('PRIORITY_FIX_TEXT');
+    assert.ok(c.buildAuditFixNote('x').startsWith(T.auditHead) && c.buildAuditFixNote('x').endsWith(T.auditFoot));
+    assert.ok(c.buildFactCheckFixNote([{ problem: 'p' }]).startsWith(T.fixRoundHead + '\n'));
+    const src = fs.readFileSync(BACKGROUND_FILE, 'utf8');
+    assert.equal(src.split('══════════════  PRIORITY FIX (from the last audit of this article)  ══════════════').length, 2, 'the banner text exists once (PRIORITY_FIX_BANNER)');
+  });
+});
+
+describe('prompt-leak samples come from the saved prompt, not the PRIORITY FIX note', () => {
+  test('a good retry that restores a lost sentence quoted in the note is not a "prompt leak" (r2_leak.js)', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const lost = 'Always check the pressure when the tyres are cold, before you drive more than a mile, because warm air expands and a hot reading can be several PSI too high, which makes you let out air the tyre needs.';
+    const original = '<p>Intro about tyres and why pressure matters for safety and fuel.</p>\n<h2>How to check</h2>\n<p>' + lost + '</p>\n<p>Use a good gauge.</p>';
+    const goodRetry = original.replace('Use a good gauge.', 'Use a good digital gauge.');
+    const err = c.factCheckBlockedError({ verdict: 'reject', issues: [{ severity: 'high', category: 'info_lost', quote: 'Use a good gauge', problem: lost, fix: 'Restore the lost sentence.' }] }, false);
+    const note = c.buildGateRetryNote(err);
+    let flaggedBefore = 0;
+    for (let L = 100; L <= 4000; L += 50) {
+      const prompt = ('Edit this WordPress article: fix grammar, keep all HTML, images and links, return one html code block. ').repeat(40).slice(0, L);
+      const jobPrompt = prompt + '\n\n' + c.__run('PRIORITY_FIX_BANNER') + '\n' + note;
+      assert.equal(c.detectPromptLeak(goodRetry, jobPrompt), null, 'prompt length ' + L);
+      assert.equal(c.verifyHtml(goodRetry, original, jobPrompt, false).ok, true, 'prompt length ' + L);
+      // the whole text (v3.45.0 / gate OFF) would flag some lengths
+      const whole = compactSample(c, goodRetry, jobPrompt);
+      if (whole) flaggedBefore++;
+    }
+    assert.ok(flaggedBefore >= 1, 'the old sampling flagged at least one length');
+    // a real leak of the saved prompt is still caught with the note appended
+    const prompt = 'Edit this WordPress article: fix grammar, keep all HTML, images and links, and return exactly one html code block with the whole article.';
+    const leak = '<p>' + prompt + '</p>' + goodRetry;
+    assert.match(c.detectPromptLeak(leak, prompt + '\n\n' + c.__run('PRIORITY_FIX_BANNER') + '\n' + note) || '', /prompt instruction text/);
+    // gate OFF: exactly the v3.45.0 sampling (the whole text)
+    c.__run('runtime.job.gateEnabled = false');
+    assert.equal(c.leakCheckPromptText('a\n\n' + c.__run('PRIORITY_FIX_BANNER') + '\nnote'), 'a\n\n' + c.__run('PRIORITY_FIX_BANNER') + '\nnote');
+  });
+  // detectPromptLeak's own sampling over the WHOLE text (what the three waits used before)
+  function compactSample(c, html, text) {
+    const out = c.compactVisibleText(html);
+    const p = c.compactVisibleText(text);
+    const samples = [p.slice(0, 180), p.slice(Math.floor(p.length * 0.25), Math.floor(p.length * 0.25) + 180), p.slice(Math.floor(p.length * 0.5), Math.floor(p.length * 0.5) + 180)]
+      .map((s) => s.trim()).filter((s) => s.length >= 60);
+    return samples.some((s) => out.includes(s));
+  }
+
+  test('v3.45.0 parity: with the gate OFF detectPromptLeak flags exactly what the baseline flags', { skip: BASELINE_SKIP }, () => {
+    const c = loadBackground();
+    gateJob(c, { gateEnabled: false });
+    const b = baseline();
+    const lost = 'Always check the pressure when the tyres are cold, before you drive more than a mile, because warm air expands and a hot reading can be several PSI too high.';
+    const html = '<p>x</p><p>' + lost + '</p>';
+    for (let L = 100; L <= 2000; L += 100) {
+      const jobPrompt = 'Edit it. '.repeat(300).slice(0, L) + '\n\n' + c.__run('PRIORITY_FIX_BANNER') + '\n' + c.buildAuditFixNote(lost);
+      assert.equal(c.detectPromptLeak(html, jobPrompt), b.detectPromptLeak(html, jobPrompt), 'L=' + L);
+    }
+  });
+});
+
+describe('the rule set follows the prompt that produced the reply (recovery reads)', () => {
+  const AMAZON = panelDefaultPrompts().DEFAULT_PROMPTS.find((p) => p.id === 'p_single_amazon');
+  const REC = 'https://chatgpt.com/c/00000000-0000-4000-8000-000000000000';
+
+  test('replyFromGatePrompt: recorded flag, marker in a recovered reply, else the current prompt', () => {
+    const c = loadBackground();
+    gateJob(c, { prompt: AMAZON.text });
+    assert.equal(c.replyFromGatePrompt({}, GOOD_BLOCK), false);
+    assert.equal(c.replyFromGatePrompt({ gatePrompt: true }, GOOD_BLOCK), true);
+    assert.equal(c.replyFromGatePrompt({ recoverFromUrl: REC }, GOOD_BLOCK), false, 'unknown, no marker: the current prompt');
+    assert.equal(c.replyFromGatePrompt({ recoverFromUrl: REC }, END + '\n' + GOOD_BLOCK), true, 'unknown, marker anywhere: a Safety Gate reply');
+    assert.equal(c.replyFromGatePrompt({ recoverFromUrl: REC, gatePrompt: false }, GOOD_BLOCK + '\n' + END), true, 'a recovered reply with the marker is never judged by the structure rules');
+    assert.equal(c.replyFromGatePrompt({ recoverFromUrl: REC, gatePrompt: true }, GOOD_BLOCK), true);
+    c.__run('runtime.job.prompt = ' + JSON.stringify(EDITOR_PROMPT));
+    assert.equal(c.replyFromGatePrompt({ recoverFromUrl: REC, gatePrompt: false }, GOOD_BLOCK), false, 'a legacy reply recovered while a Safety Gate prompt is selected');
+    assert.equal(c.replyFromGatePrompt({}, GOOD_BLOCK), true);
+  });
+
+  test('"Recover any code" of a Safety Gate reply while a legacy prompt is selected: END_MARKER_MISSING, full rules', async () => {
+    const c = loadBackground();
+    gateJob(c, { prompt: AMAZON.text, promptWebSearch: false, gateLinkCheck: false, recoverAnyCode: true, factCheck: true, factCheckOnError: 'keep' });
+    const cut = GOOD_BLOCK.slice(0, GOOD_BLOCK.lastIndexOf('<!-- wp:heading'));
+    const seen = [];
+    const real = c.SafetyGate.runSafetyGate;
+    c.SafetyGate = Object.assign({}, c.SafetyGate, { runSafetyGate: (r, h, o) => { seen.push(o); return real(r, h, o); } });
+    const ctx = (html, links) => ({ slug: 's', tag: '[1/1]', num: 1, total: 1, originalHtml: ORIG_BLOCK, aiHtml: html,
+      attemptLinks: Object.assign({ rawInput: 's', recoverFromUrl: REC }, links), attemptTabs: { edit: null, ai: null }, wpItem: { title: 'x' } });
+    const rec = ctx(cut, { gatePrompt: true });
+    await assert.rejects(c.applySafetyPipeline(rec), (e) => e.code === 'SAFETY_GATE' && /END_MARKER_MISSING/.test(e.message));
+    assert.equal(seen[0].requireEndMarker, true);
+    assert.equal(seen[0].researchRules, true);
+    assert.equal('minRetention' in seen[0], false);
+    assert.ok(c.__logs().some((l) => l === 'info [1/1] 🛡 Gate rules: full rules — Safety Gate prompt (the recovered reply came from a Safety Gate prompt).'), c.__logs().join('\n'));
+    // unknown flag but the marker somewhere in the recovered code: the same
+    const rec2 = ctx(END + '\n' + cut, {});
+    await assert.rejects(c.applySafetyPipeline(rec2), (e) => /END_MARKER_MISSING/.test(e.message));
+    assert.equal(seen[1].requireEndMarker, true);
+    // a legacy reply (recorded false) recovered while a Safety Gate prompt is selected: structure rules, no marker needed
+    c.__run('runtime.job.prompt = ' + JSON.stringify(EDITOR_PROMPT));
+    c.runFactCheck = async () => ({ verdict: 'pass', action: 'pass', issues: [], dropped: [], retryIssues: [], aiSessionUrl: '' });
+    assert.equal(await c.applySafetyPipeline(ctx(GOOD_BLOCK, { gatePrompt: false })), GOOD_BLOCK);
+    assert.equal(seen[2].requireEndMarker, false);
+    // the completeness check of a recovery read follows the same flag
+    const opts = c.completenessOptions();
+    c.__run('runtime.job.prompt = ' + JSON.stringify(AMAZON.text));
+    const s19 = E2E.GOOD_EDIT + '\n' + END;
+    assert.equal(c.assessReplyCompleteness(s19, E2E.SPANS_ORIGINAL, opts).complete, false, 'current legacy prompt: no waiver');
+    assert.equal(c.assessReplyCompleteness(s19, E2E.SPANS_ORIGINAL, opts, c.replyFromGatePrompt({ recoverFromUrl: REC, gatePrompt: true }, s19)).complete, true);
+  });
+
+  test('the flag is recorded when a prompt is sent, kept in the attempt row, and carried to recovery jobs', async () => {
+    const c = loadBackground();
+    gateJob(c, { aiMode: 'openai', aiProvider: 'openai', aiName: 'API' });
+    c.callAIProviderAPI = async () => ({ text: '```html\n' + GOOD_BLOCK + '\n' + END + '\n```' });
+    const links = { rawInput: 's' };
+    await c.generateHtmlForArticle('[1/1]', 1, 1, ORIG_BLOCK, links, { edit: null, ai: null }, 4);
+    assert.equal(links.gatePrompt, true);
+    c.__run('runtime.job.prompt = ' + JSON.stringify(AMAZON.text));
+    const legacyLinks = { rawInput: 't' };
+    c.callAIProviderAPI = async () => ({ text: '```html\n' + GOOD_BLOCK + '\n```' });
+    await c.generateHtmlForArticle('[1/1]', 1, 1, ORIG_BLOCK, legacyLinks, { edit: null, ai: null }, 4);
+    assert.equal(legacyLinks.gatePrompt, false);
+    c.rememberAttempt('s', 's', 'failed', 'x', links);
+    c.rememberAttempt('t', 't', 'failed', 'x', legacyLinks);
+    c.rememberAttempt('u', 'u', 'failed', 'x', {});
+    assert.deepEqual(plain(c.__run('runtime.attempts')).map((a) => a.gatePrompt), [true, false, null]);
+    // startBatch keeps only booleans, and only for recovery jobs
+    const norm = (extra) => { const j = Object.assign({ slugs: ['a', 'b'], site: { url: 'https://tubetyre.com/' }, prompt: 'p', aiUrl: 'https://chatgpt.com/', aiName: 'ChatGPT', aiMode: 'web' }, extra); return j; };
+    const seenJobs = [];
+    c.processLoop = async () => { seenJobs.push(plain(c.__run('runtime.job'))); };
+    c.runParallelBatch = async () => { seenJobs.push(plain(c.__run('runtime.job'))); };
+    await c.startBatch(norm({ recoverMap: { a: REC, b: REC.replace('0000-4000', '0000-4001') }, recoverGateMap: { a: true, b: 'yes', zz: false } })).catch((e) => { throw e; });
+    await c.startBatch(norm({ slugs: ['a'], recoverFromUrl: REC, recoverGatePrompt: false }));
+    await c.startBatch(norm({ recoverGatePrompt: true, recoverGateMap: { a: true } }));
+    const jobs = seenJobs.length ? seenJobs : [];
+    assert.ok(jobs.length >= 3, 'startBatch ran three times (' + jobs.length + ')');
+    assert.deepEqual(jobs[0].recoverGateMap, { a: true });
+    assert.equal(jobs[1].recoverGatePrompt, false);
+    assert.equal(jobs[2].recoverGatePrompt, null);
+    assert.equal(jobs[2].recoverGateMap, null);
+  });
+
+  test('processLoop / parallel / HTML recovery hand the recorded flag to the recovery read', async () => {
+    const c = loadBackground();
+    gateJob(c, { slugs: ['post-a', 'post-b'], delayBetween: 0, retryMode: 'off', maxRetries: 0,
+      recoverMap: { 'post-a': REC, 'post-b': REC.replace('0000-4000', '0000-4001') }, recoverGateMap: { 'post-a': true } });
+    c.__set('runtime.running', true);
+    c.__set('runtime.cursor', 0);
+    c.sleep = async () => {};
+    const seen = {};
+    c.processSlug = async (slug, num, total, links) => { seen[slug] = links.gatePrompt; };
+    await c.processLoop();
+    assert.deepEqual(seen, { 'post-a': true, 'post-b': undefined });
+    // parallel
+    const p = loadBackground();
+    gateJob(p, { slugs: ['a', 'b'], parallel: 2, delayBetween: 0, retryMode: 'off', maxRetries: 0, recoverMap: { a: REC, b: REC.replace('0000-4000', '0000-4001') }, recoverGateMap: { b: false } });
+    p.__set('runtime.running', true);
+    p.sleep = async () => {};
+    p.swPing = async () => {};
+    const pseen = {};
+    p.processSlug = async (slug, num, total, links) => { pseen[slug] = links.gatePrompt; };
+    await p.runParallelBatch();
+    assert.deepEqual(pseen, { a: undefined, b: false });
+    // single recovery (recoverFromUrl + recoverGatePrompt)
+    const s = loadBackground();
+    gateJob(s, { slugs: ['one'], delayBetween: 0, retryMode: 'off', maxRetries: 0, recoverFromUrl: REC, recoverGatePrompt: true });
+    s.__set('runtime.running', true);
+    s.__set('runtime.cursor', 0);
+    s.sleep = async () => {};
+    let one;
+    s.processSlug = async (slug, num, total, links) => { one = links.gatePrompt; };
+    await s.processLoop();
+    assert.equal(one, true);
+    // automatic HTML recovery after a failed attempt
+    const h = loadBackground();
+    gateJob(h);
+    let got;
+    h.processSlug = async (slug, num, total, links) => { got = links.gatePrompt; };
+    await h.tryHtmlRecovery('x', 'x', 1, 1, REC, 'https://chatgpt.com/', true);
+    assert.equal(got, true);
+  });
+
+  test('Fast Submit: the recovery phase gets the flag of each sent prompt', async () => {
+    const c = loadBackground();
+    gateJob(c);
+    const src = fs.readFileSync(BACKGROUND_FILE, 'utf8');
+    assert.match(src, /status: 'submitted',\n\s*\/\/ v3\.46\.0: the kind of prompt sent[^\n]*\n\s*gatePrompt: promptRequiresEndMarker\(\)/);
+    await c.__storage;
+    c.__storage.__fastQueue = {
+      entries: [
+        { rawSlug: 'a', slug: 'a', sessionUrl: REC, status: 'submitted', gatePrompt: true },
+        { rawSlug: 'b', slug: 'b', sessionUrl: REC.replace('0000-4000', '0000-4001'), status: 'submitted', gatePrompt: false },
+        { rawSlug: 'c', slug: 'c', sessionUrl: REC.replace('0000-4000', '0000-4002'), status: 'submitted' }
+      ],
+      config: Object.assign({}, plain(c.__run('runtime.job')), { recoverGateMap: { zz: true } }),
+      createdAt: Date.now(), recoverAt: 0
+    };
+    let job = null;
+    c.startBatch = async (j) => { job = plain(j); return { ok: true }; };
+    await c.startFastRecovery('manual').catch(() => {});
+    assert.ok(job, 'the recovery batch was started');
+    assert.deepEqual(job.recoverGateMap, { a: true, b: false });
+  });
+});
+
+describe('retry notes: kept across note-less failures, fix-round reasons, cleaned up after use', () => {
+  const loopCtx = (extra) => {
+    const c = loadBackground();
+    gateJob(c, Object.assign({ slugs: ['post-a'], delayBetween: 0 }, extra || {}));
+    c.__set('runtime.running', true);
+    c.__set('runtime.cursor', 0);
+    c.sleep = async () => {};
+    c.tryHtmlRecovery = async () => false;
+    return c;
+  };
+  const imgErr = (c, l) => c.safetyGateBlockedError(l, ['IMG_COUNT'], ['Image count changed: original 2, edited 1.'], [], []);
+
+  test('(a) end-of-batch: a note-less last failure (the fallback AI timed out) keeps the gate reasons for the retry pass', async () => {
+    const c = loopCtx({ retryMode: 'end', maxRetries: 0, fallbackAi: { aiName: 'Claude API', aiMode: 'anthropic', aiProvider: 'anthropic', aiUrl: '', aiApiModel: 'm', aiApiKey: 'k' } });
+    const notes = [];
+    let n = 0;
+    c.processSlug = async (slug, num, total, links) => {
+      notes.push(links.auditFixNote || '');
+      n++;
+      if (n === 1) throw imgErr(c, links);
+      if (n === 2) throw new Error('AI API timed out before returning a response');
+      if (n === 3) throw new Error('AI API timed out again');
+    };
+    await c.processLoop();
+    assert.equal(notes.length, 4, 'main try, fallback, retry pass, its fallback');
+    assert.equal(notes[0], '');
+    assert.match(notes[1], /IMG_COUNT/);
+    assert.match(notes[2], /REJECTED by the automatic Safety Gate[\s\S]*IMG_COUNT/, 'the retry pass still says why');
+    assert.match(notes[3], /IMG_COUNT/);
+  });
+
+  test('(b) a Safety Gate block of the fact-check fix round: the note lists the gate codes AND the fact-check issues', async () => {
+    const c = loadBackground();
+    gateJob(c, { gateLinkCheck: false, promptWebSearch: true, factCheck: true });
+    const issue = { severity: 'high', category: 'fact_wrong', quote: 'Soak the pan overnight', problem: 'Dangerous advice: soaking makes it rust.', fix: 'Remove the sentence.' };
+    c.runFactCheck = async () => ({ verdict: 'fix', action: 'fix', issues: [issue], dropped: [], retryIssues: [issue], aiSessionUrl: '' });
+    c.regenerateForFactCheckFix = async () => GOOD_BLOCK.replace('<img', '<span') + '\n' + END;
+    const ctx = { slug: 's', tag: '[1/1]', num: 1, total: 1, originalHtml: ORIG_BLOCK, aiHtml: GOOD_BLOCK + '\n' + END,
+      attemptLinks: { rawInput: 's' }, attemptTabs: { edit: null, ai: null }, wpItem: { title: 'x' } };
+    let err = null;
+    await c.applySafetyPipeline(ctx).catch((e) => { err = e; });
+    assert.equal(err && err.code, 'SAFETY_GATE');
+    assert.equal(plain(err.factIssues).length, 1);
+    const note = c.buildGateRetryNote(err);
+    assert.match(note, /^Your previous edit of this exact article was REJECTED by the automatic Safety Gate/);
+    assert.match(note, /\n1\. IMG_COUNT — /);
+    assert.match(note, /\nBefore that, an AI fact check had found these problems in an earlier edit of this article \(fix them too\):\n1\. \[HIGH \/ fact_wrong\] Problem: Dangerous advice: soaking makes it rust\. Fix: Remove the sentence\. Text in your previous edit: "Soak the pan overnight"\.\n/);
+    assert.ok(note.endsWith(c.__run('PRIORITY_FIX_TEXT.gateFoot')));
+    assert.ok(note.length <= 3000);
+    // a gate block of the FIRST edit carries no fact issues
+    const first = await c.applySafetyPipeline(Object.assign({}, ctx, { aiHtml: GOOD_BLOCK.replace('<img', '<span') + '\n' + END, attemptLinks: { rawInput: 's' } })).catch((e) => e);
+    assert.equal(first.code, 'SAFETY_GATE');
+    assert.doesNotMatch(c.buildGateRetryNote(first), /fact check had found/);
+    // the size cap keeps whole lines: a long gate part leaves no room → no bridge line without an issue
+    const codes = plain(c.SafetyGate.ERROR_CODES);
+    const big = c.safetyGateBlockedError({}, codes, codes.map((x) => x + ' ' + 'long message '.repeat(40)), [], []);
+    big.factIssues = [issue];
+    const bigNote = c.buildGateRetryNote(big);
+    assert.ok(bigNote.length <= 3000);
+    assert.doesNotMatch(bigNote, /Before that, an AI fact check/);
+  });
+
+  test('(c) runtime.retryNotes: dropped after the retry pass used it (success or failure) and after a success', async () => {
+    for (const outcome of ['pass', 'fail']) {
+      const c = loopCtx({ retryMode: 'end', maxRetries: 0 });
+      let n = 0;
+      const persisted = [];
+      const realPersist = c.persistRuntime;
+      c.persistRuntime = async () => { await realPersist(); persisted.push(plain(c.__storage.__runtime.retryNotes)); };
+      c.processSlug = async (slug, num, total, links) => {
+        n++;
+        if (n === 1 || outcome === 'fail') throw imgErr(c, links);
+      };
+      await c.processLoop();
+      assert.equal(n, 2, outcome);
+      assert.ok(persisted.some((m) => m && m['post-a']), outcome + ': the note was carried to the retry pass');
+      assert.deepEqual(plain(c.__run('runtime.retryNotes')), {}, outcome + ': nothing left after the retry pass');
+    }
+    // parallel
+    const p = loopCtx({ slugs: ['a', 'b'], parallel: 2, retryMode: 'end', maxRetries: 0 });
+    p.swPing = async () => {};
+    const tries = {};
+    p.processSlug = async (slug, num, total, links) => {
+      tries[slug] = (tries[slug] || 0) + 1;
+      if (tries[slug] === 1) throw imgErr(p, links);
+    };
+    await p.runParallelBatch();
+    assert.deepEqual(tries, { a: 2, b: 2 });
+    assert.deepEqual(plain(p.__run('runtime.retryNotes')), {});
+    // a direct success forgets a stale entry too
+    const d = loopCtx({ retryMode: 'off', maxRetries: 0 });
+    d.__set('runtime.retryNotes', { 'post-a': { note: 'old', label: 'x' }, other: { note: 'keep', label: 'y' } });
+    d.processSlug = async () => {};
+    await d.processLoop();
+    assert.deepEqual(plain(d.__run('runtime.retryNotes')), { other: { note: 'keep', label: 'y' } });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Second review round: the end-marker waiver's last-section test must find
+// the original's LAST section (not one shared word), decode entities, accept
+// a renamed concluding heading; PROMPT_ECHO also finds gate code names, the
+// banner words and note text in alt / title attributes.
+// ──────────────────────────────────────────────────────────────────────
+describe('end-marker waiver: the original\'s last section must really be there', () => {
+  const waived = (c, html, orig) => c.assessReplyCompleteness(html + '\n' + END, orig, c.completenessOptions());
+  const para = (t) => '<!-- wp:paragraph -->\n<p>' + t + '</p>\n<!-- /wp:paragraph -->';
+  const h2 = (t) => '<!-- wp:heading -->\n<h2 class="wp-block-heading">' + t + '</h2>\n<!-- /wp:heading -->';
+  // FAQ accordion rebuild of the H3 questions (the editor prompt's FAQ design)
+  const accordion = (h, q, a) => h.replace(/<!-- wp:heading \{"level":3\} -->\n<h3 class="wp-block-heading">([^<]*)<\/h3>\n<!-- \/wp:heading -->\n\n<!-- wp:paragraph -->\n<p>([\s\S]*?)<\/p>\n<!-- \/wp:paragraph -->/g,
+    (m, qq, aa) => '<!-- wp:html -->\n<details><summary>' + (q ? q(qq) : qq) + '</summary><p>' + (a ? a(aa) : aa) + '</p></details>\n<!-- /wp:html -->');
+
+  test('S96 / S98 ports: a reply that stops before the last section is not waived, even when that section shares its words with the article', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const r1 = waived(c, E2E.T_CUT, E2E.T_ORIGINAL);
+    assert.equal(r1.complete, false);
+    assert.equal(r1.coverageWaived, false);
+    assert.match(plain(r1.reasons).join('; '), /not waived for the <!-- APU-END --> end marker: the last section \("Final Thoughts on Cast Iron Care"\) of the original is missing$/);
+    // the old lenient test would have let it through (one shared word)
+    assert.equal(c.headingStillPresent('Final Thoughts on Cast Iron Care', c.readableArticleText(E2E.T_CUT)), true);
+    assert.ok(c.readableArticleText(E2E.T_CUT).length / c.readableArticleText(E2E.T_ORIGINAL).length >= 0.85, 'the readable text alone would pass');
+    const r2 = waived(c, E2E.F_CUT, E2E.F_ORIGINAL);
+    assert.equal(r2.complete, false);
+    assert.match(plain(r2.reasons).join('; '), /the last section \("How often should I season my pan\?"\) of the original is missing$/);
+    // the same after an FAQ accordion rebuild that drops the last question
+    const acc = accordion(E2E.F_GOOD);
+    const accCut = acc.slice(0, acc.lastIndexOf('<!-- wp:html -->')).trim();
+    assert.equal(waived(c, accCut, E2E.F_ORIGINAL).complete, false);
+    // stopped right after the last heading (no text under it)
+    assert.equal(waived(c, E2E.CUT_REPLY + '\n\n' + h2('Conclusion'), E2E.CUT_ORIGINAL).complete, false);
+    assert.equal(waived(c, E2E.CUT_REPLY + '\n\n' + h2('Final Thoughts'), E2E.CUT_ORIGINAL).complete, false);
+    // an earlier concluding-style heading of the original does not stand in for the last one
+    const sumSec = h2('Summary') + '\n\n' + para('Warm cleaning, full drying and a light oil coat keep the surface smooth and rust free for decades.');
+    const origSum = E2E.CUT_ORIGINAL.replace('<!-- wp:heading -->\n<h2 class="wp-block-heading">Conclusion</h2>', sumSec + '\n\n<!-- wp:heading -->\n<h2 class="wp-block-heading">Conclusion</h2>');
+    assert.ok(origSum.length > E2E.CUT_ORIGINAL.length);
+    const r3 = waived(c, E2E.CUT_REPLY + '\n\n' + sumSec, origSum);
+    assert.equal(r3.complete, false);
+    assert.match(plain(r3.reasons).join('; '), /the last section \("Conclusion"\) of the original is missing$/);
+    // a Key Takeaways box (the prompt may put it right before the last main
+    // section) that repeats a long phrase of the Conclusion does not stand in for it
+    const box = '<!-- wp:html -->\n<div style="background:#fdf8e3;border:1px solid #efe2a0;border-radius:8px;"><p style="font-weight:700;">Key Takeaways</p><ul><li>Keep a thin coat of oil on it and cook with it often.</li><li>Dry it completely after every wash.</li></ul></div>\n<!-- /wp:html -->';
+    assert.equal(waived(c, E2E.CUT_REPLY + '\n\n' + box, E2E.CUT_ORIGINAL).complete, false);
+    // the same box in a complete edit changes nothing
+    assert.equal(waived(c, E2E.CUT_GOOD.replace('<!-- wp:heading -->\n<h2 class="wp-block-heading">Conclusion</h2>', box + '\n\n<!-- wp:heading -->\n<h2 class="wp-block-heading">Conclusion</h2>'), E2E.CUT_ORIGINAL).complete, true);
+  });
+
+  test('S97 port and friends: good clean-up edits that reword the last heading or question are waived', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const ok = (label, html, orig) => {
+      const r = waived(c, html, orig || E2E.CUT_ORIGINAL);
+      assert.equal(r.complete, true, label + ': ' + plain(r.reasons).join('; '));
+      assert.equal(r.coverageWaived, true, label);
+    };
+    ok('Conclusion -> Final Thoughts', E2E.RENAMED_GOOD);
+    ok('Conclusion -> The Bottom Line', E2E.renameLastHeading(E2E.CUT_GOOD, 'The Bottom Line'));
+    ok('Conclusion -> a question (text kept)', E2E.renameLastHeading(E2E.CUT_GOOD, 'Is Cast Iron Worth the Care?'));
+    ok('Conclusion kept', E2E.CUT_GOOD);
+    // renamed AND rewritten: a concluding heading renamed to another one, with text under it
+    ok('Conclusion -> Final Thoughts, text rewritten', E2E.renameLastHeading(E2E.CUT_GOOD, 'Final Thoughts')
+      .replace(/(Final Thoughts<\/h2>\n<!-- \/wp:heading -->\n\n<!-- wp:paragraph -->\n<p>)[^<]*/, '$1Treat the pan kindly after each meal and it will reward you with years of easy, non-stick cooking.'));
+    // a Sources list added after the Conclusion
+    ok('Sources added at the end', E2E.CUT_GOOD + '\n\n' + h2('Sources') + '\n\n<!-- wp:html -->\n<ol><li><a href="https://example.org/">Maker</a>: care steps</li></ol>\n<!-- /wp:html -->');
+    // FAQ-last: accordion rebuild; the last question reworded, its answer kept
+    ok('FAQ accordion rebuild', accordion(E2E.F_GOOD), E2E.F_ORIGINAL);
+    ok('FAQ accordion, last question reworded', accordion(E2E.F_GOOD, (q) => q.replace('How often should I season my pan?', 'When does a pan need re-seasoning?')), E2E.F_ORIGINAL);
+    // Word / Google Docs entities in the original
+    ok('&nbsp; in the last heading', E2E.CUT_GOOD, E2E.CUT_ORIGINAL.replace('>Conclusion</h2>', '>Conclusion&nbsp;</h2>'));
+    ok('Final&nbsp;Thoughts', E2E.RENAMED_GOOD, E2E.CUT_ORIGINAL.replace('>Conclusion</h2>', '>Final&nbsp;Thoughts</h2>'));
+    const nb = (h) => h.replace(/<span style="[^"]*">([\s\S]*?)<\/span>/g, (m, t) => '<span style="font-weight: 400;">' + t.replace(/ /g, '&nbsp;') + '</span>');
+    ok('every space of the original is &nbsp;', E2E.CUT_GOOD, nb(E2E.CUT_ORIGINAL));
+    // the reason names the plain heading, not its entities
+    const r = waived(c, E2E.CUT_REPLY, E2E.CUT_ORIGINAL.replace('>Conclusion</h2>', '>Conclusion&nbsp;</h2>'));
+    assert.match(plain(r.reasons).join('; '), /the last section \("Conclusion"\) of the original is missing$/);
+  });
+
+  test('known limit (fail closed): the last FAQ question AND its answer both rewritten is not waived', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const html = accordion(E2E.F_GOOD, (q) => q.replace('How often should I season my pan?', 'When does a pan need re-seasoning?'),
+      (a) => a.indexOf('Wipe on a thin coat') === 0 ? 'Give it a light coat after washing; do a full oven round only if food sticks or it looks dull.' : a);
+    assert.equal(waived(c, html, E2E.F_ORIGINAL).complete, false);
+  });
+
+  test('decodeTextEntities / readableArticleText: entities are text, decoded once', () => {
+    const c = loadBackground();
+    assert.equal(c.decodeTextEntities('a&nbsp;b &amp;nbsp; &#8217; &#xA0;&#160;x &bogus; &#0;'), 'a b &nbsp; ’   x &bogus; &#0;');
+    assert.equal(c.readableArticleText('<p>Pros&nbsp;&amp;&nbsp;Cons</p>'), 'pros & cons');
+    assert.equal(c.readableArticleText('<p>Pros &amp; Cons</p>'), c.readableArticleText('<p>Pros & Cons</p>'));
+  });
+
+  test('fast on a big article', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const body = E2E.CUT_GOOD.slice(0, E2E.CUT_GOOD.lastIndexOf('<!-- wp:heading'));
+    const big = body.repeat(25);
+    const t0 = Date.now();
+    const r = waived(c, big, E2E.CUT_ORIGINAL.slice(0, E2E.CUT_ORIGINAL.lastIndexOf('<!-- wp:heading')).repeat(25) + E2E.CUT_ORIGINAL.slice(E2E.CUT_ORIGINAL.lastIndexOf('<!-- wp:heading')));
+    assert.equal(r.complete, false);
+    assert.ok(Date.now() - t0 < 1500, (Date.now() - t0) + ' ms');
+  });
+});
+
+describe('PROMPT_ECHO: gate code names, banner words, alt / title text', () => {
+  const withPara = (html, text) => html.replace('<!-- /wp:paragraph -->', '<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>' + text + '</p>\n<!-- /wp:paragraph -->');
+
+  test('a short reason line, the banner words or note text in an alt attribute are echoes; normal text is not', () => {
+    const c = loadBackground();
+    gateJob(c);
+    const note = c.buildGateRetryNote(c.safetyGateBlockedError({}, ['NUMBER_MISSING'], ['Price $25 is gone.'], [], []));
+    assert.match(note, /1\. NUMBER_MISSING — /);
+    // the reason line: its hint is shorter than the 60-character window
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, '1. NUMBER_MISSING — Price $25 is gone. Keep every price, percentage and year of the original.'), ORIG_BLOCK, note), 'NUMBER_MISSING');
+    // the banner words without the ═ rules; any gate code, note or not
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, 'PRIORITY FIX (from the last audit of this article)'), ORIG_BLOCK, note), 'PRIORITY FIX');
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, 'See IMG_COUNT.'), ORIG_BLOCK, ''), 'IMG_COUNT');
+    // a fact-check note line marker
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, '1. [HIGH / info_lost] Problem: the tip is gone.'), ORIG_BLOCK, ''), '[HIGH / info_lost] Problem:');
+    // note text in an alt / title attribute
+    const head = note.split('\n')[0];
+    const altEcho = GOOD_BLOCK.replace(/alt="[^"]*"/, 'alt="' + head.replace(/"/g, '&quot;') + '"');
+    assert.notEqual(altEcho, GOOD_BLOCK);
+    assert.notEqual(c.findPromptEcho(altEcho, ORIG_BLOCK, note), '');
+    assert.equal(c.findPromptEcho(GOOD_BLOCK.replace(/alt="[^"]*"/, 'alt="IMG_COUNT"'), ORIG_BLOCK, ''), 'IMG_COUNT');
+    // not echoes: lower-case words, a code the original has, code-like words that are not gate codes, an HTML comment
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, 'Our priority fix for a flat tyre is a plug kit. Img count and table loss are not problems here.'), ORIG_BLOCK, note), '');
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, 'The error LINK_MISSING appears in the log.'), withPara(ORIG_BLOCK, 'The error LINK_MISSING appears in the log.'), note), '');
+    assert.equal(c.findPromptEcho(withPara(GOOD_BLOCK, 'Set MAX_PRESSURE and TYRE_SIZE in the app.'), ORIG_BLOCK, note), '');
+    assert.equal(c.findPromptEcho(GOOD_BLOCK + '\n<!-- 1. NUMBER_MISSING — PRIORITY FIX -->', ORIG_BLOCK, note), '');
+  });
+
+  test('the gate blocks a reason-line echo as PROMPT_ECHO', async () => {
+    const c = loadBackground();
+    gateJob(c);
+    const html = withPara(GOOD_BLOCK, '2. LINK_MISSING — a link is gone.');
+    await assert.rejects(c.runSafetyGateStep({ tag: '[t]', attemptLinks: { rawInput: 'x' } }, ORIG_BLOCK, html + '\n' + END, 'AI', ''),
+      (e) => e.code === 'SAFETY_GATE' && /PROMPT_ECHO — The article repeats text of the PRIORITY FIX note sent with the prompt \("LINK_MISSING…"\)/.test(e.message));
   });
 });
 

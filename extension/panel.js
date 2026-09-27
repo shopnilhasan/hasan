@@ -2218,7 +2218,10 @@ function archiveProcessedAttempts(attempts) {
       isoTime: attempt.isoTime || new Date().toISOString(),
       // 🛡 v3.46.0: why the Safety Gate / Fact check blocked (or noted) this post.
       gate: compactGateInfo(attempt.gate),
-      factCheck: compactFactCheckInfo(attempt.factCheck)
+      factCheck: compactFactCheckInfo(attempt.factCheck),
+      // 🛡 v3.46.0: true = the chat's reply came from a Safety Gate prompt (null =
+      // unknown). A later "Retry AI session" / "Recover any code" is judged by it.
+      gatePrompt: (typeof attempt.gatePrompt === 'boolean') ? attempt.gatePrompt : null
     });
     // STRICT rule: a slug leaves the Posts-to-update box ONLY when its post
     // reaches a FINAL state — Successful, Audit Issues, or Failed — because it
@@ -2883,6 +2886,8 @@ function recoverProcessedLink(index, recoverAnyCode) {
   const job = Object.assign({ slugs: [slug] }, r.config, {
     recoverFromUrl: sessionUrl,
     recoverProviderUrl: item.aiProviderUrl || '',
+    // 🛡 the rules of the prompt that produced this chat's reply, not the current one
+    recoverGatePrompt: (typeof item.gatePrompt === 'boolean') ? item.gatePrompt : null,
     retryMode: 'off',
     maxRetries: 0,
     fallbackAi: null,
@@ -2951,12 +2956,14 @@ function retryAllSectionRecovery(rows, label) {
 function retryAllAiSession(rows, label, recoverAnyCode, recoverSections) {
   if (state.batchActive) return showMsg('A batch is already running. Wait for it to finish or press Stop first.', 'err');
   if (!requireSaved()) return;   // Fix 6
-  const recoverMap = {}; const recoverProviderMap = {}; const slugs = [];
+  const recoverMap = {}; const recoverProviderMap = {}; const recoverGateMap = {}; const slugs = [];
   rows.forEach(p => {
     const slug = _slugOfRow(p); const url = recoverableAiSessionHref(p.aiSessionUrl, p.aiProviderUrl);
     if (slug && url && !recoverMap[slug]) {
       recoverMap[slug] = url;
       recoverProviderMap[slug] = p.aiProviderUrl || '';
+      // 🛡 the rules of the prompt that produced this chat's reply (v3.46.0)
+      if (typeof p.gatePrompt === 'boolean') recoverGateMap[slug] = p.gatePrompt;
       slugs.push(slug);
     }
   });
@@ -2970,7 +2977,7 @@ function retryAllAiSession(rows, label, recoverAnyCode, recoverSections) {
   }
   const r = (typeof resolveRunConfig === 'function') ? resolveRunConfig() : { ok: false, error: 'config unavailable' };
   if (!r.ok) return showMsg('Cannot recover: ' + r.error + '.', 'err');
-  const job = Object.assign({ slugs }, r.config, { recoverMap: recoverMap, recoverProviderMap: recoverProviderMap, retryMode: 'off', maxRetries: 0, fallbackAi: null, auditRetry: false, htmlRecoveryAudit: false, htmlRecoveryFailed: false, recoverAnyCode: recoverAnyCode === true, recoverSections: recoverSections === true });
+  const job = Object.assign({ slugs }, r.config, { recoverMap: recoverMap, recoverProviderMap: recoverProviderMap, recoverGateMap: recoverGateMap, retryMode: 'off', maxRetries: 0, fallbackAi: null, auditRetry: false, htmlRecoveryAudit: false, htmlRecoveryFailed: false, recoverAnyCode: recoverAnyCode === true, recoverSections: recoverSections === true });
   _bulkStart(job, 'Recovering ' + (recoverAnyCode ? 'ANY HTML code for ' : recoverSections ? 'Intro/FAQ/Conclusion articles for ' : '') + slugs.length + ' ' + label + ' post(s) from their saved AI sessions, one by one...');
 }
 { const b = document.getElementById('retryAllFailedNewBtn'); if (b) b.onclick = () => retryAllNewSession(_failedRows(), 'failed'); }
@@ -4227,14 +4234,23 @@ function safetyGateSummary(prompt) {
       (state.factCheckOnError === 'save' ? ' (saves anyway if the check breaks)' : ' (keeps the original if the check breaks)');
   }
   // Prompts from before v3.46.0 have no end marker: the gate checks them with
-  // its structure rules only (no research rules). The strict no-research rules
-  // apply to Safety Gate prompts with web search Off — say so up front.
+  // its structure rules. Their no-research rules (prices, dates, "Last
+  // updated") are dropped only while a fail-closed fact check stands behind
+  // the gate (fact check on, keep the original when it breaks); otherwise the
+  // code keeps enforcing them. The strict no-research rules always apply to
+  // Safety Gate prompts with web search Off — say so up front.
   const warn = [];
-  const gatePrompt = !!prompt && String(prompt.text || '').indexOf('APU-END') >= 0;
+  const gatePrompt = !!prompt && /APU-END/i.test(String(prompt.text || ''));
   if (prompt && !gatePrompt) {
     const sgEditor = state.prompts.find(p => p.id === SAFETY_GATE_PROMPTS[0].id && isRunPrompt(p));
-    warn.push('⚠ The prompt "' + (prompt.name || 'Untitled') + '" was not written for the Safety Gate (it has no <!-- APU-END --> end marker), so the gate uses its structure rules: images, media, tables, links, shortcodes, blocks and lost text are checked; prices, dates and "Last updated" lines are not checked by code, and a cut-off reply is caught only by the older completeness checks.' +
-      (sgEditor && sgEditor.id !== prompt.id ? ' The "' + sgEditor.name + '" prompt is made for it.' : ''));
+    const failClosedFactCheck = state.factCheck !== 'off' && state.factCheckOnError !== 'save';
+    let research;
+    if (prompt.webSearch) research = 'Web search is allowed for it, so prices, dates and "Last updated" lines are not checked by code.';
+    else if (failClosedFactCheck) research = 'Prices, dates and "Last updated" lines are not checked by code; the AI fact check reviews them. The built-in fact-check prompt reports a lost price and a "Last updated" line it cannot verify as serious problems, so such edits usually end as FACT CHECK BLOCKED (the original stays live).';
+    else research = 'Because the fact check is ' + (state.factCheck === 'off' ? 'OFF' : 'set to save the edit when it breaks') +
+      ', the code still checks prices, dates and "Last updated" lines: an edit that removes or changes a price, percentage or year, or adds a "Last updated" line or today\'s date, is blocked. With the fact check on (keep the original when it breaks) the code leaves these changes to the fact check, but the built-in fact-check prompt usually blocks them too.';
+    warn.push('⚠ The prompt "' + (prompt.name || 'Untitled') + '" was not written for the Safety Gate (it has no <!-- APU-END --> end marker), so the gate uses its structure rules: images, media, tables, links, shortcodes, blocks and lost text are checked, and a cut-off reply is caught only by the older completeness checks. ' +
+      research + (sgEditor && sgEditor.id !== prompt.id ? ' The "' + sgEditor.name + '" prompt is made for it.' : ''));
   }
   if (prompt && gatePrompt && !prompt.webSearch) {
     warn.push('⚠ Web search is OFF for this prompt: the Safety Gate blocks any new or removed price, percentage or year and any new "Last checked"/"updated" line, and removes new deep links. Tick "Allow AI web search with this prompt" if the prompt tells the AI to research.');

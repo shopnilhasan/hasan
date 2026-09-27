@@ -49,6 +49,27 @@
 //       carries a PRIORITY FIX note naming IMG_COUNT → good edit saved once
 //   S19 the edit strips <span style> clutter (~75% of the source length) and
 //       carries <!-- APU-END --> → accepted as complete and saved
+//   S20 = S16 with the fact check OFF: no fail-closed fact check behind the
+//       gate, so the research rules block the same legacy edit (NUMBER_MISSING,
+//       LAST_CHECKED_WITHOUT_RESEARCH)
+//   S21 reply cut before the Conclusion, <!-- APU-END --> at the TOP of the
+//       code box (the verifier's S90) → not saved
+//   S22 reply stops before the Conclusion, marker as the last line (the
+//       verifier's S92) → not saved (the last section is missing)
+//   S23 the retry pastes its PRIORITY FIX note into the article → blocked
+//       (PROMPT_ECHO), nothing saved
+//   S24 fact check "fix" → the fix round drops an image → gate block → the
+//       end-of-batch retry's note names IMG_COUNT AND the fact-check issue →
+//       good edit saved once
+//   S25 a Safety Gate prompt's reply is cut before its marker (blocked); the
+//       user selects an older prompt and clicks "Recover any code" → still
+//       judged by the Safety Gate prompt's rules: END_MARKER_MISSING
+//   S26 the last H2 is "Final Thoughts on Cast Iron Care"; the reply stops
+//       before it, marker as the last line (the verifier's S96) → not saved
+//   S27 span clean-up that renames "Conclusion" to "Final Thoughts", marker
+//       at the end (the verifier's S97) → saved
+//   S28 FAQ-last post: the reply drops the last question and answer, marker
+//       at the end (the verifier's S98) → not saved
 //
 // Usage:
 //   node extension-tests/e2e/run-e2e.js [--only S1,S4] [--skip S9] [--jobs 3]
@@ -448,7 +469,11 @@ const SCENARIOS = [
     // Amazon Product" prompt: no <!-- APU-END -->, web search off) gets the
     // gate's structure rules only: a removed price, a "Last updated" line with
     // today's date and a new deep link are not blocked, and the new link is
-    // still link-checked (alive → kept).
+    // still link-checked (alive → kept). NOTE: the fake fact check always
+    // answers "pass". The real built-in fact-check prompt would most likely
+    // flag the lost price and the unverified "Last updated" line (high), so
+    // this scenario tests the CODE path only; the Start dialog and
+    // SAFETY-GATE.md warn that such edits usually end as FACT CHECK BLOCKED.
     id: 'S16', title: S.SCENARIOS.S16.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
     check(c, t) {
       const expected = S.legacyEdit();
@@ -472,6 +497,7 @@ const SCENARIOS = [
       t.notLog(c, /Removed link/, 'log: no link was removed');
       t.log(c, /Safety Gate PASSED/, 'log: Safety Gate PASSED');
       t.ok(/structure rules/.test(c.confirmText), 'Start confirm dialog explains the structure rules', c.confirmText);
+      t.ok(/usually end as FACT CHECK BLOCKED/.test(c.confirmText), 'Start confirm dialog warns that the built-in fact check usually blocks such edits', c.confirmText);
       t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
     }
   },
@@ -537,10 +563,200 @@ const SCENARIOS = [
       t.eq(c.editorChats.length, 1, 'one editor chat (no continue prompt, no retry)');
       t.row(c, 'updated');
       t.log(c, /Code box COMPLETE at \d+ chars \(\d+% of source/, 'log: the code box was accepted as complete');
-      t.log(c, /accepted because it carries the <!-- APU-END --> end marker/, 'log: the end-marker exception was used');
+      t.log(c, /accepted because it ends with the <!-- APU-END --> end marker, \d+% of the source text is there and the last section \("Conclusion"\) is present/, 'log: the end-marker exception was used (marker at the end, text and last section present)');
       t.notLog(c, /looks truncated|looked incomplete|asking the AI to continue|Output looks cut/i, 'log: no truncation handling');
       t.log(c, /Safety Gate PASSED/, 'log: Safety Gate PASSED');
       t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
+    // S16's legacy edit with the fact check OFF: nothing fail-closed stands
+    // behind the gate, so the code keeps the research rules and blocks it.
+    id: 'S20', title: S.SCENARIOS.S20.title, prompt: 'p_single_amazon', original: S.LEGACY_ORIGINAL,
+    storage: { factCheck: 'off' },
+    check(c, t) {
+      t.eq(c.writes.length, 0, 'NO WordPress write');
+      t.same(c.post.content, S.LEGACY_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/^SAFETY GATE BLOCKED: /.test(c.row && c.row.message || ''), 'row message starts with SAFETY GATE BLOCKED');
+      const codes = (c.row && c.row.gate && c.row.gate.codes) || [];
+      t.ok(codes.indexOf('NUMBER_MISSING') >= 0, 'row.gate.codes contains NUMBER_MISSING (the removed price)', codes.join(','));
+      t.ok(codes.indexOf('LAST_CHECKED_WITHOUT_RESEARCH') >= 0, 'row.gate.codes contains LAST_CHECKED_WITHOUT_RESEARCH (the "Last updated" line)', codes.join(','));
+      t.ok(codes.indexOf('IMG_COUNT') < 0, 'no image problem (the edit keeps the images)', codes.join(','));
+      t.eq(c.factChats.length, 0, 'no fact check (it is OFF)');
+      t.eq(c.editorChats.length, 1, 'one editor chat');
+      t.log(c, /Gate rules: structure rules \+ research rules — this prompt is not a Safety Gate prompt.*the fact check is off/, 'log: structure rules + research rules because the fact check is off');
+      t.ok(/the code still checks prices, dates and "Last updated" lines/.test(c.confirmText), 'Start confirm dialog says the code still checks prices and dates', c.confirmText);
+      t.panel(c, 'failedList', [c.slug, 'NUMBER_MISSING'], 'panel: Failed box row names NUMBER_MISSING');
+    }
+  },
+  {
+    // Ported from the verifier's S90: the reply stops before the Conclusion and
+    // carries <!-- APU-END --> at the TOP of the code box. A marker that is not
+    // the last line proves nothing: the length check stands.
+    id: 'S21', title: S.SCENARIOS.S21.title, prompt: 'p_sg_editor', original: S.CUT_ORIGINAL,
+    check(c, t) {
+      t.ok(S.CUT_REPLY.indexOf('Conclusion') < 0, 'the reply has no Conclusion section (cut off)');
+      t.eq(c.writes.length, 0, 'NO WordPress write (a cut-off reply must never be saved)');
+      if (c.writes[0]) t.ok(false, 'SAVED content ends with: ' + JSON.stringify(c.writes[0].content.slice(-160)));
+      t.same(c.post.content, S.CUT_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/looks truncated|looked incomplete|END_MARKER_MISSING/.test(c.row && c.row.message || ''), 'row message: truncated / incomplete', c.row && c.row.message);
+      t.eq(c.factChats.length, 0, 'no fact check');
+      t.notLog(c, /accepted because it ends with the <!-- APU-END --> end marker|Safety Gate PASSED/, 'log: the end-marker exception was NOT used, the gate never passed it');
+    }
+  },
+  {
+    // Ported from the verifier's S92: the marker IS the last line, but the
+    // Conclusion never came — the last section of the original is missing.
+    id: 'S22', title: S.SCENARIOS.S22.title, prompt: 'p_sg_editor', original: S.CUT_ORIGINAL,
+    check(c, t) {
+      t.eq(c.writes.length, 0, 'NO WordPress write (Conclusion missing)');
+      if (c.writes[0]) t.ok(false, 'SAVED content ends with: ' + JSON.stringify(c.writes[0].content.slice(-160)));
+      t.same(c.post.content, S.CUT_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/the last section \("Conclusion"\) of the original is missing/.test(c.row && c.row.message || ''), 'row message names the missing last section', c.row && c.row.message);
+      t.eq(c.factChats.length, 0, 'no fact check');
+      t.notLog(c, /accepted because it ends with the <!-- APU-END --> end marker|Safety Gate PASSED/, 'log: the end-marker exception was NOT used');
+    }
+  },
+  {
+    // The automatic retry pastes its own PRIORITY FIX note into the article.
+    id: 'S23', title: S.SCENARIOS.S23.title, prompt: 'p_sg_editor',
+    storage: { retryMode: 'end', maxRetries: '1' },
+    check(c, t) {
+      t.eq(c.writes.length, 0, 'NO WordPress write');
+      t.same(c.post.content, S.ORIGINAL_HTML, 'WordPress still holds the original');
+      t.eq(c.editorChats.length, 3, 'three editor chats (first attempt + end-of-batch pass with 1 retry)');
+      const [e1, e2] = c.editorChats;
+      t.ok(e1 && !S.hasPriorityFixBlock(e1.payload), 'first payload has no PRIORITY FIX block');
+      t.ok(e2 && S.hasPriorityFixBlock(e2.payload) && e2.payload.indexOf(S.ECHO_SENTENCE) >= 0, 'the retry payload carries the note the reply echoes');
+      t.row(c, 'failed');
+      const codes = (c.row && c.row.gate && c.row.gate.codes) || [];
+      t.ok(codes.indexOf('PROMPT_ECHO') >= 0, 'final row.gate.codes contains PROMPT_ECHO', codes.join(','));
+      t.log(c, /Gate error — PROMPT_ECHO/, 'log: Gate error — PROMPT_ECHO');
+      t.eq(c.logLines.filter((l) => /Gate error — PROMPT_ECHO/.test(l)).length, 2, 'log: both retries were blocked for the echo');
+      t.eq(c.factChats.length, 0, 'no fact check after gate blocks');
+      t.panel(c, 'failedList', [c.slug, 'PROMPT_ECHO'], 'panel: Failed box row names PROMPT_ECHO');
+    }
+  },
+  {
+    // A blocked fact-check fix round: the automatic retry is told both why the
+    // gate blocked the fix round AND what the fact check had found.
+    id: 'S24', title: S.SCENARIOS.S24.title, prompt: 'p_sg_editor',
+    storage: { retryMode: 'end', maxRetries: '1' },
+    check(c, t) {
+      const FIX_RE = /\u2550{3,}[ \t]+PRIORITY FIX\b/;
+      t.eq(c.editorChats.length, 3, 'three editor chats (first edit, fix round, end-of-batch retry)');
+      t.eq(c.factChats.length, 2, 'two fact checks (first edit, retry)');
+      const [e1, e2, e3] = c.editorChats;
+      t.ok(e2 && e2.payload.indexOf('A fact-check of your previous edit') > 0, 'the fix round got the fact-check note');
+      const note = e3 ? e3.payload.slice(Math.max(0, e3.payload.search(FIX_RE))) : '';
+      t.ok(/REJECTED by the automatic Safety Gate/.test(note), 'the retry note says the Safety Gate rejected the fix round');
+      t.ok(/IMG_COUNT/.test(note), 'the retry note names IMG_COUNT');
+      t.ok(/Before that, an AI fact check had found these problems/.test(note), 'the retry note also lists the fact-check problems');
+      t.ok(note.indexOf('soaking cast iron makes it rust') >= 0, 'the retry note carries the fact-check issue itself');
+      t.ok(note.length < 3300, 'the note is short (' + note.length + ' chars)');
+      t.same(e3 && bannerSection(e3.payload, 'ARTICLE HTML'), S.ORIGINAL_HTML.trim(), 'the retry edits the ORIGINAL article');
+      t.eq(c.writes.length, 1, 'saved exactly once');
+      t.same(c.writes[0] ? c.writes[0].content : '', S.GOOD_EDIT.trim(), 'saved content = the retry\'s good edit');
+      t.ok(e1 && e1.payload && !S.hasPriorityFixBlock(e1.payload), 'the first payload has no PRIORITY FIX block');
+      t.ok(!!c.writes[0] && c.writes[0].content.indexOf(S.BAD_CLAIM) < 0, 'the flagged claim is not saved');
+      t.row(c, 'updated');
+      t.log(c, /SAFETY GATE BLOCKED the fix-round edit/, 'log: the gate blocked the fix-round edit');
+      t.log(c, /The retry tells the AI why the previous edit was rejected \(Safety Gate: [A-Z_, ]*IMG_COUNT/, 'log: the retry attached the reasons');
+      t.panel(c, 'processedList', [c.slug], 'panel: row in the Successful box');
+    }
+  },
+  {
+    // The rule set follows the prompt that PRODUCED the reply: a Safety Gate
+    // prompt's cut-off reply, recovered with "Recover any code" while an older
+    // prompt is selected, is still judged by the Safety Gate prompt's rules.
+    id: 'S25', title: S.SCENARIOS.S25.title, prompt: 'p_sg_editor', original: S.CUT_ORIGINAL,
+    async followUp(panel, c) {
+      await panel.bringToFront();
+      await panel.selectOption('#runPromptSelect', 'p_single_amazon');
+      await sleep(500);
+      await panel.click('#saveRunConfigBtn');
+      await sleep(500);
+      c.promptAfterSwitch = await panel.evaluate(() => document.getElementById('runPromptSelect').value);
+      let clicked = false;
+      for (let i = 0; i < 30 && !clicked; i++) {
+        clicked = await panel.evaluate((slug) => {
+          const card = Array.from(document.querySelectorAll('#failedList .processed-item')).find((el) => (el.textContent || '').indexOf(slug) >= 0);
+          const btn = card && card.querySelector('[data-recover-any]');
+          if (!btn) return false;
+          btn.click();
+          return true;
+        }, c.slug);
+        if (!clicked) await sleep(1000);
+      }
+      if (!clicked) throw new Error('no "Recover any code" button on the Failed row of ' + c.slug);
+    },
+    check(c, t) {
+      const first = c.firstRows && c.firstRows[0];
+      t.ok(first && first.result === 'failed' && /looks truncated|looked incomplete/.test(first.message || ''), 'first batch: blocked as incomplete', first && first.message);
+      t.ok(first && first.gatePrompt === true, 'first attempt row records gatePrompt = true', JSON.stringify(first && first.gatePrompt));
+      t.eq(c.promptAfterSwitch, 'p_single_amazon', 'the follow-up ran with the older prompt selected');
+      t.eq(c.writes.length, 0, 'NO WordPress write in either batch');
+      t.same(c.post.content, S.CUT_ORIGINAL, 'WordPress still holds the original');
+      t.eq(c.editorChats.length, 1, 'recovery sent no new prompt (one editor chat in total)');
+      t.log(c, /accepted it through the manual ANY CODE override/, 'log: any-code recovery read the code box');
+      t.log(c, /Gate rules: full rules — Safety Gate prompt \(the recovered reply came from a Safety Gate prompt\)/, 'log: the recovered reply is judged by the Safety Gate prompt\'s rules');
+      t.row(c, 'failed');
+      const codes = (c.row && c.row.gate && c.row.gate.codes) || [];
+      t.ok(codes.indexOf('END_MARKER_MISSING') >= 0, 'recovery row.gate.codes contains END_MARKER_MISSING', codes.join(','));
+      t.eq(c.factChats.length, 0, 'no fact check');
+      t.panel(c, 'failedList', [c.slug, 'END_MARKER_MISSING'], 'panel: still in the Failed box');
+    }
+  },
+  {
+    // Ported from the verifier's S96: the original's last section heading
+    // shares its words with the rest of the article. The reply stops before
+    // it and ends with the marker: the last section is missing, not waived.
+    id: 'S26', title: S.SCENARIOS.S26.title, prompt: 'p_sg_editor', original: S.T_ORIGINAL,
+    check(c, t) {
+      t.ok(S.T_CUT.indexOf('Final Thoughts') < 0, 'the reply has no "Final Thoughts on Cast Iron Care" section');
+      t.eq(c.writes.length, 0, 'NO WordPress write (last section missing)');
+      if (c.writes[0]) t.ok(false, 'SAVED content ends with: ' + JSON.stringify(c.writes[0].content.slice(-160)));
+      t.same(c.post.content, S.T_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/the last section \("Final Thoughts on Cast Iron Care"\) of the original is missing/.test(c.row && c.row.message || ''), 'row message names the missing last section', c.row && c.row.message);
+      t.eq(c.factChats.length, 0, 'no fact check');
+      t.notLog(c, /accepted because it ends with the <!-- APU-END --> end marker|Safety Gate PASSED/, 'log: the end-marker exception was NOT used');
+    }
+  },
+  {
+    // Ported from the verifier's S97: a good clean-up edit that renames the
+    // Conclusion is accepted (a concluding heading renamed to another one).
+    id: 'S27', title: S.SCENARIOS.S27.title, prompt: 'p_sg_editor', original: S.CUT_ORIGINAL,
+    check(c, t) {
+      const cov = S.RENAMED_GOOD.length / S.CUT_ORIGINAL.length;
+      t.ok(cov < 0.8, 'the edit is ' + Math.round(cov * 100) + '% of the source length (below the 85% completeness minimum)');
+      t.eq(c.writes.length, 1, 'exactly one WordPress write (a good clean-up edit)');
+      t.same(c.writes[0] ? c.writes[0].content : '', S.RENAMED_GOOD.trim(), 'saved content = the cleaned-up edit (marker stripped)');
+      t.row(c, 'updated');
+      t.log(c, /accepted because it ends with the <!-- APU-END --> end marker, \d+% of the source text is there and the last section \("Conclusion"\) is present/, 'log: the end-marker exception was used');
+      t.log(c, /Safety Gate PASSED/, 'log: Safety Gate PASSED');
+      // The report-only post-save audit (unchanged since v3.45.0) still names
+      // the renamed "Conclusion" as missing: the row goes to the Audit box.
+      t.log(c, /Post-save AUDIT ISSUES: 1 original section\(s\) missing: "Conclusion"/, 'log: the v3.45.0 post-save audit reports the renamed Conclusion (report only)');
+      t.panel(c, 'auditIssuesList', [c.slug], 'panel: row in the Audit Issues box (saved)');
+    }
+  },
+  {
+    // Ported from the verifier's S98: the FAQ is the last section; the reply
+    // drops the last question and answer and ends with the marker.
+    id: 'S28', title: S.SCENARIOS.S28.title, prompt: 'p_sg_editor', original: S.F_ORIGINAL,
+    check(c, t) {
+      t.ok(S.F_CUT.indexOf('How often should I season my pan?') < 0 && S.F_ORIGINAL.indexOf('How often should I season my pan?') > 0, 'the reply lacks the original\'s last FAQ question');
+      t.eq(c.writes.length, 0, 'NO WordPress write (the last FAQ question and answer are missing)');
+      if (c.writes[0]) t.ok(false, 'SAVED content ends with: ' + JSON.stringify(c.writes[0].content.slice(-160)));
+      t.same(c.post.content, S.F_ORIGINAL, 'WordPress still holds the original');
+      t.row(c, 'failed');
+      t.ok(/the last section \("How often should I season my pan\?"\) of the original is missing/.test(c.row && c.row.message || ''), 'row message names the missing last question', c.row && c.row.message);
+      t.eq(c.factChats.length, 0, 'no fact check');
+      t.notLog(c, /accepted because it ends with the <!-- APU-END --> end marker|Safety Gate PASSED/, 'log: the end-marker exception was NOT used');
     }
   },
   {

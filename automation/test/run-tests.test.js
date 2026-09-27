@@ -1439,7 +1439,7 @@ test('no false fails from the new text rules: normal sentences that look a bit l
 
 // ---------------------------------------------------------------------------------------------
 // browser extension Safety Gate (v1.2.0): end marker, tables/lists, classic conversion,
-// webSearchAllowed, researchRules (v1.3.0), runSafetyGate, self.SafetyGate
+// webSearchAllowed, researchRules (v1.3.0), end marker at the end (v1.3.1), runSafetyGate, self.SafetyGate
 // ---------------------------------------------------------------------------------------------
 const GATE = { siteDomains: ['tubetyre.com'], endMarker: 'APU-END', requireEndMarker: true };
 const END = '<!-- APU-END -->';
@@ -1483,6 +1483,73 @@ test('END_MARKER_MISSING: a required end marker must be there (truncated reply);
   assert.equal(validate(GOOD, { endMarker: 'APU-END', requireEndMarker: 'yes' }).pass, true);
   // without endMarker options the marker is just a new comment (old behaviour)
   expectWarning(validate(GOOD + '\n' + END), 'NEW_HTML_COMMENT');
+});
+
+test('endsWithEndMarker (v1.3.1): the marker must be the LAST line; only whitespace or a closing code fence may follow', () => {
+  const E = V.endsWithEndMarker;
+  assert.equal(E(GOOD + '\n' + END), true);
+  assert.equal(E(GOOD + '\n' + END + '\n\n  \t\r\n'), true);
+  assert.equal(E(GOOD + '\n' + END + '\n```'), true);
+  assert.equal(E(GOOD + '\n' + END + '\n```\n'), true);
+  assert.equal(E(GOOD + '\n<!--apu-end-->'), true);
+  assert.equal(E(GOOD + '\n<!--   APU-END   -->'), true);
+  assert.equal(E(GOOD + '\n' + END + '\n' + END), true);
+  assert.equal(E('<p>a</p>\n<!-- END-X -->', 'END-X'), true);
+  assert.equal(E('<p>a</p>\n' + END, 'END-X'), false);
+  // anywhere else: not finished
+  assert.equal(E(END + '\n' + GOOD), false);
+  assert.equal(E(GOOD.replace('</p>', '</p>\n' + END)), false);
+  assert.equal(E('<!-- last line: ' + END + ' -->\n' + GOOD), false);
+  assert.equal(E(GOOD + '\n' + END + '\n</div>'), false);
+  assert.equal(E(GOOD + '\n' + END + '\nThanks!'), false);
+  assert.equal(E(GOOD + '\n<!-- APU-ENDING -->'), false);
+  assert.equal(E(GOOD + '\n&lt;!-- APU-END --&gt;'), false);
+  assert.equal(E(''), false);
+  assert.equal(E(null), false);
+  // a huge whitespace run costs nothing
+  const t0 = Date.now();
+  assert.equal(E(GOOD + ' '.repeat(2000000) + 'x'), false);
+  assert.equal(E(GOOD + '\n' + END + ' '.repeat(2000000)), true);
+  assert.ok(Date.now() - t0 < 1500, 'slow: ' + (Date.now() - t0) + ' ms');
+});
+
+test('END_MARKER_MISSING (v1.3.1): a marker at the top, after the intro or in an echoed comment of a cut-off reply is not enough', async () => {
+  // cut at a clean block boundary: the last three sections are gone
+  const cut = GOOD.slice(0, GOOD.indexOf('<!-- wp:heading', Math.floor(GOOD.length * 0.6))).trim();
+  assert.ok(cut.length < GOOD.length * 0.9 && cut.length > GOOD.length * 0.5, String(cut.length / GOOD.length));
+  const variants = {
+    top: END + '\n' + cut,
+    afterIntro: replaceOnce(cut, '<!-- /wp:paragraph -->', '<!-- /wp:paragraph -->\n' + END),
+    echoed: '<!-- last line: ' + END + ' -->\n' + cut
+  };
+  for (const [name, html] of Object.entries(variants)) {
+    const v = validate(html, GATE);
+    expectError(v, 'END_MARKER_MISSING');
+    const m = v.errors.find((e) => e.code === 'END_MARKER_MISSING').message;
+    assert.match(m, /is not at the end of the reply \(it must be the last line\)/, name);
+    const r = await V.runSafetyGate(ORIG, html, Object.assign({}, GATE, NOFETCH));
+    assert.equal(r.ok, false, name);
+    assert.equal(r.errors[0].code, 'END_MARKER_MISSING', name);
+    assert.match(r.errors[0].message, /not at the end/, name);
+    assert.equal(r.stats.endMarkerFound, true, name);
+    assert.equal(r.stats.endMarkerAtEnd, false, name);
+    assert.equal(r.html, ORIG, name);
+    assert.ok(!/APU-END/i.test(r.candidateHtml), name + ': every marker copy is stripped');
+  }
+  // a missing marker keeps its own message
+  assert.match(validate(cut, GATE).errors[0].message, /is missing: the AI reply was probably cut off/);
+  // a stray copy in the middle is fine when the reply also ENDS with the marker; every copy is removed
+  const twice = replaceOnce(GOOD, '<!-- /wp:paragraph -->', '<!-- /wp:paragraph -->\n' + END) + '\n' + END + '\n';
+  assert.deepEqual(validate(twice, GATE).errors, []);
+  const r = await V.runSafetyGate(ORIG, twice, Object.assign({}, GATE, NOFETCH));
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.equal(r.html, GOOD + '\n');
+  assert.equal(r.stats.endMarkerAtEnd, true);
+  // not required: a marker in the middle is simply removed
+  assert.equal(validate(END + '\n' + GOOD, { endMarker: 'APU-END' }).pass, true);
+  const nr = await V.runSafetyGate(ORIG, END + '\n' + GOOD, Object.assign({}, GATE, NOFETCH, { requireEndMarker: false }));
+  assert.equal(nr.ok, true, JSON.stringify(nr.errors));
+  assert.equal(nr.html, GOOD);
 });
 
 test('TABLE_LOSS (hard): a table or a table row removed; LIST_LOSS (warning): more than 30% of list items gone', () => {
@@ -1781,7 +1848,7 @@ test('browser build: the file loaded as a classic worker script exposes self.Saf
   vm.runInContext(src, ctx, { filename: 'safety-gate.js' });
   const G = ctx.SafetyGate;
   assert.ok(G && typeof G === 'object');
-  assert.deepEqual(Object.keys(G).sort(), ['ERROR_CODES', 'VERSION', 'WARNING_CODES', 'checkLinks', 'filterAuditIssues', 'findNewLinks',
+  assert.deepEqual(Object.keys(G).sort(), ['ERROR_CODES', 'VERSION', 'WARNING_CODES', 'checkLinks', 'endsWithEndMarker', 'filterAuditIssues', 'findNewLinks',
     'runSafetyGate', 'sanitizeLinks', 'stripEndMarkers', 'validateArticle'].sort());
   assert.equal(G.VERSION, V.VERSION);
   assert.ok(G.ERROR_CODES.includes('END_MARKER_MISSING') && G.ERROR_CODES.includes('TABLE_LOSS'));

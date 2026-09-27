@@ -16,6 +16,7 @@
  *   filterAuditIssues(editedHtml, audit, extra)            -> audit with verified issues only
  *   processEditorOutput(originalHtml, llmText, options)    -> Promise<{ action, html, ... }>
  *   stripEndMarkers(html, marker)                          -> html without <!-- APU-END --> comments
+ *   endsWithEndMarker(html, marker)                        -> true when <!-- APU-END --> is the reply's last line
  *   runSafetyGate(referenceHtml, aiHtml, options)          -> Promise<{ ok, html, errors, warnings, removedLinks, linkResults, stats }>
  *
  * Browser extension: the same file is shipped as extension/safety-gate.js (byte-identical) and loaded with
@@ -31,7 +32,7 @@
  * Fail-closed rule: anything unexpected => action "keep_original" (the live article is not touched).
  */
 
-const VALIDATE_ARTICLE_VERSION = '1.3.0';
+const VALIDATE_ARTICLE_VERSION = '1.3.1';
 
 const MARKER_HTML = '<<<ARTICLE_HTML>>>';
 const MARKER_META = '<<<META_JSON>>>';
@@ -311,6 +312,26 @@ function endMarkerSrc(marker) {
 
 function hasEndMarker(html, marker) {
   return new RegExp(endMarkerSrc(marker), 'i').test(toStr(html));
+}
+
+/**
+ * True only when the end marker is the LAST thing in the reply: after it come nothing but whitespace and a closing
+ * code fence (```). A marker earlier in the reply (at the top, after the intro, echoed in a comment) does not prove
+ * that the reply was finished. Scans back from the end, so a long run of whitespace costs nothing.
+ */
+function endsWithEndMarker(html, marker) {
+  const s = toStr(html);
+  let i = s.length;
+  while (i > 0 && (s[i - 1] === '`' || /\s/.test(s[i - 1]))) i--;
+  return new RegExp(endMarkerSrc(marker) + '$', 'i').test(s.slice(Math.max(0, i - 400), i));
+}
+
+/** END_MARKER_MISSING message: the marker is absent, or present but not at the end. */
+function endMarkerMissingMessage(html, marker) {
+  const name = '<!-- ' + (toStr(marker).trim() || DEFAULT_END_MARKER) + ' -->';
+  return hasEndMarker(html, marker)
+    ? 'The end marker ' + name + ' is not at the end of the reply (it must be the last line): the AI reply was probably cut off (truncated).'
+    : 'The end marker ' + name + ' is missing: the AI reply was probably cut off (truncated).';
 }
 
 /**
@@ -1922,12 +1943,13 @@ function validateArticle(originalHtml, editedHtml, options) {
   // CRLF (Windows) originals compare equal to the model's LF output.
   let originalN = normalizeNewlines(originalHtml);
   let editedN = normalizeNewlines(editedHtml);
-  // Browser mode: the prompt ends the article with <!-- APU-END -->. A reply without it was cut off (truncated).
-  // The markers themselves are not part of the article and are compared (and saved) without them.
+  // Browser mode: the prompt ends the article with <!-- APU-END -->. A reply without it, or with it anywhere but at
+  // the very end, was cut off (truncated). The markers themselves are not part of the article and are compared
+  // (and saved) without them.
   const endMarker = opts.endMarker || (opts.requireEndMarker ? DEFAULT_END_MARKER : '');
   if (endMarker) {
-    if (opts.requireEndMarker && !hasEndMarker(editedN, endMarker)) {
-      error('END_MARKER_MISSING', 'The end marker <!-- ' + endMarker + ' --> is missing: the AI reply was probably cut off (truncated).');
+    if (opts.requireEndMarker && !endsWithEndMarker(editedN, endMarker)) {
+      error('END_MARKER_MISSING', endMarkerMissingMessage(editedN, endMarker));
     }
     originalN = stripEndMarkers(originalN, endMarker);
     editedN = stripEndMarkers(editedN, endMarker);
@@ -2789,10 +2811,12 @@ async function runSafetyGate(referenceHtml, aiHtml, options) {
     const originalN = stripEndMarkers(normalizeNewlines(reference), marker);
     const raw = normalizeNewlines(aiHtml);
     const markerFound = hasEndMarker(raw, marker);
+    // Only a marker at the very end proves the reply was finished (a marker at the top or in the middle does not).
+    const markerAtEnd = endsWithEndMarker(raw, marker);
     const edited = stripEndMarkers(raw, marker);
     out.html = originalN;
-    if (opts.requireEndMarker && !markerFound) {
-      out.errors.push({ code: 'END_MARKER_MISSING', message: 'The end marker <!-- ' + marker + ' --> is missing: the AI reply was probably cut off (truncated).' });
+    if (opts.requireEndMarker && !markerAtEnd) {
+      out.errors.push({ code: 'END_MARKER_MISSING', message: endMarkerMissingMessage(raw, marker) });
     }
     if (!edited.trim()) {
       out.errors.push({ code: 'PARSE_EMPTY_HTML', message: 'The edited HTML is empty.' });
@@ -2823,7 +2847,7 @@ async function runSafetyGate(referenceHtml, aiHtml, options) {
     const v = validateArticle(originalN, san.html, Object.assign({}, opts, { deadUrls: removals, endMarker: '', requireEndMarker: false }));
     out.errors = out.errors.concat(v.errors);
     out.warnings = out.warnings.concat(v.warnings);
-    out.stats = Object.assign({}, v.stats, { endMarkerFound: markerFound, newLinks: newLinks.length });
+    out.stats = Object.assign({}, v.stats, { endMarkerFound: markerFound, endMarkerAtEnd: markerAtEnd, newLinks: newLinks.length });
     out.candidateHtml = san.html;
     if (v.pass && !out.errors.length) {
       out.ok = true;
@@ -2976,6 +3000,7 @@ if (typeof module !== 'undefined' && module && module.exports) {
     processEditorOutput: processEditorOutput,
     runSafetyGate: runSafetyGate,
     stripEndMarkers: stripEndMarkers,
+    endsWithEndMarker: endsWithEndMarker,
     runCli: runCli,
     ERROR_CODES: ERROR_CODES,
     WARNING_CODES: WARNING_CODES,
@@ -3000,6 +3025,7 @@ if (typeof module !== 'undefined' && module && module.exports) {
     VERSION: VALIDATE_ARTICLE_VERSION,
     runSafetyGate: runSafetyGate,
     stripEndMarkers: stripEndMarkers,
+    endsWithEndMarker: endsWithEndMarker,
     filterAuditIssues: filterAuditIssues,
     validateArticle: validateArticle,
     sanitizeLinks: sanitizeLinks,

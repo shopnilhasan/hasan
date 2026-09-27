@@ -337,6 +337,101 @@ SCENARIOS.S19 = {
   factCheck: () => jsonReply(PASS)
 };
 
+// S20: the legacy prompt of S16 with the fact check OFF: no fail-closed fact
+// check stands behind the gate, so the research rules block the same edit.
+SCENARIOS.S20 = {
+  title: 'legacy prompt, fact check OFF: research rules block',
+  editor: () => amazonReply(legacyEdit()),
+  factCheck: () => jsonReply(PASS)
+};
+
+// S21 / S22 (ported from the verifier's S90 / S92): a classic-style post whose
+// headings have no id (so no ID_MISSING), full of <span style> clutter. The
+// reply STOPS BEFORE THE CONCLUSION (a clean block boundary), about 70% of the
+// source length. S21: the <!-- APU-END --> marker sits at the TOP of the code
+// box. S22: the marker is the last line, but the Conclusion never came.
+const NOID = (h) => h.replace(/ id="[^"]*"/g, '');
+const CUT_ORIGINAL = NOID(SPANS_ORIGINAL);
+const CUT_GOOD = NOID(GOOD_EDIT);
+const CUT_REPLY = CUT_GOOD.slice(0, CUT_GOOD.lastIndexOf('<!-- wp:heading')).trim();
+SCENARIOS.S21 = {
+  title: 'reply cut before Conclusion, marker at the TOP',
+  editor: () => editorReply(END + '\n' + CUT_REPLY, { noMarker: true }),
+  factCheck: () => jsonReply(PASS)
+};
+SCENARIOS.S22 = {
+  title: 'reply stops before Conclusion, marker at the end',
+  editor: () => editorReply(CUT_REPLY),
+  factCheck: () => jsonReply(PASS)
+};
+
+// S23: the first reply drops an image; the automatic retry gets the PRIORITY
+// FIX note and pastes its first sentence into the article (PROMPT_ECHO).
+const ECHO_SENTENCE = 'Your previous edit of this exact article was REJECTED by the automatic Safety Gate, so nothing was saved.';
+SCENARIOS.S23 = {
+  title: 'retry reply echoes the PRIORITY FIX note',
+  editor: (ctx) => hasPriorityFixBlock(ctx.payload)
+    ? editorReply(article({ edited: true, afterIntro: para(ECHO_SENTENCE) }))
+    : editorReply(article({ edited: true, dropImage2: true })),
+  factCheck: () => jsonReply(PASS)
+};
+
+// S24: fact check "fix" -> the fix round drops an image -> Safety Gate block;
+// the end-of-batch retry's note names IMG_COUNT AND the fact-check issue that
+// caused the fix round -> good edit -> saved once.
+SCENARIOS.S24 = {
+  title: 'blocked fix round: retry note carries gate + fact-check reasons',
+  editor: (ctx) => {
+    if (hasPriorityFixBlock(ctx.payload) && /REJECTED by the automatic Safety Gate/.test(ctx.payload)) return editorReply(GOOD_EDIT);
+    if (hasPriorityFixBlock(ctx.payload)) return editorReply(article({ edited: true, dropImage2: true }));
+    return editorReply(article({ edited: true, cleanExtra: ' ' + BAD_CLAIM }));
+  },
+  factCheck: (ctx) => ctx.payload.indexOf(BAD_CLAIM) >= 0
+    ? jsonReply({ verdict: 'fix', issues: [BAD_CLAIM_ISSUE] })
+    : jsonReply(PASS)
+};
+
+// S25: a Safety Gate prompt's reply is cut off before its end marker (blocked
+// as incomplete). The user then selects an OLDER prompt and clicks "Recover
+// any code": the saved chat must still be judged by the Safety Gate prompt's
+// rules (END_MARKER_MISSING), not by the prompt selected now.
+SCENARIOS.S25 = {
+  title: 'Recover any code after switching to a legacy prompt',
+  editor: () => editorReply(CUT_REPLY, { noMarker: true }),
+  factCheck: () => jsonReply(PASS)
+};
+
+// S26 / S27 / S28 (ported from the verifier's S96 / S97 / S98): the
+// end-marker length waiver must find the original's LAST section, not one
+// shared word. S26: the last H2 is "Final Thoughts on Cast Iron Care" (its
+// words are all over the article); the reply stops before it and ends with
+// the marker. S27: a GOOD span clean-up that renames "Conclusion" to "Final
+// Thoughts". S28: the FAQ is the last section; the reply drops the last
+// question and answer and ends with the marker.
+const renameLastHeading = (h, t) => h.replace('<h2 class="wp-block-heading">Conclusion</h2>', '<h2 class="wp-block-heading">' + t + '</h2>');
+const cutBeforeLastHeading = (h) => h.slice(0, h.lastIndexOf('<!-- wp:heading')).trim();
+const T_ORIGINAL = renameLastHeading(CUT_ORIGINAL, 'Final Thoughts on Cast Iron Care');
+const T_CUT = cutBeforeLastHeading(renameLastHeading(CUT_GOOD, 'Final Thoughts on Cast Iron Care'));
+const RENAMED_GOOD = renameLastHeading(CUT_GOOD, 'Final Thoughts');
+const F_ORIGINAL = cutBeforeLastHeading(CUT_ORIGINAL);
+const F_GOOD = cutBeforeLastHeading(CUT_GOOD);
+const F_CUT = cutBeforeLastHeading(F_GOOD);
+SCENARIOS.S26 = {
+  title: 'stops before "Final Thoughts on Cast Iron Care", marker at end',
+  editor: () => editorReply(T_CUT),
+  factCheck: () => jsonReply(PASS)
+};
+SCENARIOS.S27 = {
+  title: 'span clean-up + Conclusion renamed Final Thoughts',
+  editor: () => editorReply(RENAMED_GOOD),
+  factCheck: () => jsonReply(PASS)
+};
+SCENARIOS.S28 = {
+  title: 'FAQ-last post, last Q&A dropped, marker at end',
+  editor: () => editorReply(F_CUT),
+  factCheck: () => jsonReply(PASS)
+};
+
 // Update mode "editor" (wp-admin Classic Editor instead of the REST API):
 // the replies of S1 (good edit) and S2 (an image dropped).
 SCENARIOS.S14 = Object.assign({}, SCENARIOS.S1, { title: 'editor mode: good edit + fact-check pass' });
@@ -854,6 +949,8 @@ async function startServer(opts) {
 module.exports = {
   startServer, SCENARIOS, classifyPayload, hasPriorityFixBlock, article, legacyEdit, todayYmd,
   ORIGINAL_HTML, GOOD_EDIT, BAD_CLAIM, LIVE_LINK, DEAD_LINK, END, LEGACY_ORIGINAL, SPANS_ORIGINAL, PRICE_SENTENCE,
+  CUT_ORIGINAL, CUT_GOOD, CUT_REPLY, ECHO_SENTENCE, BAD_CLAIM_ISSUE,
+  T_ORIGINAL, T_CUT, RENAMED_GOOD, F_ORIGINAL, F_GOOD, F_CUT, renameLastHeading, cutBeforeLastHeading,
   WP_HOST, LINK_HOST, WP_USER, WP_APP_PASSWORD
 };
 
