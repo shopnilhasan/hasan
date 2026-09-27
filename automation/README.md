@@ -1,5 +1,9 @@
 # Unattended article editor
 
+> **Using the Chrome extension (Auto Post Updater Pro)?** Read [`extension/SAFETY-GATE.md`](../extension/SAFETY-GATE.md) instead.
+> This folder is the standalone / API version: you call the AI API from your own code.
+> The extension ships its own copy of the validator (`extension/safety-gate.js`) and of the browser prompts (`extension/prompts/`).
+
 This folder lets an AI improve your WordPress articles when **nobody checks them by hand**.
 Every check a person used to do is now done by the prompt, by code, or by a second AI.
 If any step fails, the original article stays live. Nothing is lost.
