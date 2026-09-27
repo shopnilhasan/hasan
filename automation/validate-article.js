@@ -17,15 +17,16 @@
  *   processEditorOutput(originalHtml, llmText, options)    -> Promise<{ action, html, ... }>
  *
  * CLI:
- *   node automation/validate-article.js --original orig.html --output llm-output.txt
- *        [--site a.com,b.com] [--searches N] [--faq auto|no] [--no-link-check]
- *        [--write-html out.html] [--report report.json]
+ *   node automation/validate-article.js --original orig.html --output llm-output.txt --site a.com,b.com
+ *        [--searches N] [--faq auto|no] [--title "Post title"] [--last-checked yes|no|auto]
+ *        [--today YYYY-MM-DD] [--no-link-check] [--write-html out.html] [--report report.json]
  *   exit codes: 0 publish, 2 keep_original, 3 skip, 1 usage/IO error.
+ *   --write-html and --report files from an earlier run are deleted first, so a stale file never survives.
  *
  * Fail-closed rule: anything unexpected => action "keep_original" (the live article is not touched).
  */
 
-const VALIDATE_ARTICLE_VERSION = '1.0.0';
+const VALIDATE_ARTICLE_VERSION = '1.1.0';
 
 const MARKER_HTML = '<<<ARTICLE_HTML>>>';
 const MARKER_META = '<<<META_JSON>>>';
@@ -36,19 +37,37 @@ const DEFAULT_FORBIDDEN_LINK_DOMAINS = [
   'tiktok.com', 'x.com', 'twitter.com', 'blogspot.com', 'amzn.to'
 ];
 
+// Short links and search/grounding redirect hosts. Always unwrapped when NEW (reason "redirect"), even when
+// options.forbiddenLinkDomains replaces the default list: their target is unknown and they often expire.
+const REDIRECT_LINK_DOMAINS = [
+  'vertexaisearch.cloud.google.com', 't.co', 'bit.ly', 'goo.gl', 'tinyurl.com', 'ow.ly', 'lnkd.in', 'rebrand.ly',
+  'shorturl.at', 'buff.ly', 'is.gd', 'cutt.ly', 'rb.gy', 'tiny.cc', 't.ly', 'v.gd', 'amzn.to', 'a.co'
+];
+// Search-engine click-through redirect addresses (google.com/url?..., bing.com/ck/..., duckduckgo.com/l/...).
+const SEARCH_REDIRECT_RE = /^https?:\/\/(?:www\.)?(?:google\.[a-z.]{2,12}\/url\?|bing\.com\/ck\/|duckduckgo\.com\/l\/)/i;
+// Domain parking / for-sale hosts: a new link that redirects here points to a lapsed domain.
+const PARKING_HOSTS = ['hugedomains.com', 'sedo.com', 'sedoparking.com', 'dan.com', 'afternic.com', 'godaddy.com',
+  'bodis.com', 'parkingcrew.net', 'above.com', 'undeveloped.com'];
+// Tracking query parameters removed from NEW links (search tools add utm_source=openai and similar).
+const TRACKING_PARAM_RE = /^(?:utm_[a-z0-9_]*|srsltid|gclid|gclsrc|dclid|fbclid|msclkid|mc_cid|mc_eid|_ga|_gl|yclid|gad_source|igshid)$/i;
+
 const ERROR_CODES = [
-  'PARSE_MISSING_MARKER', 'PARSE_META_JSON', 'PARSE_EMPTY_HTML',
-  'IMG_COUNT', 'IMG_CHANGED', 'MEDIA_COUNT', 'ELEMENT_COUNT', 'SHORTCODE_MISSING', 'LINK_MISSING', 'ID_MISSING',
-  'PLUGIN_BLOCK_CHANGED', 'MEDIA_BLOCK_CHANGED', 'SCRIPT_CHANGED', 'SPECIAL_COMMENT_MISSING', 'FORBIDDEN_TAG',
-  'FIRST_ELEMENT_NOT_P', 'HEADING_ORDER', 'PLACEHOLDER', 'CODE_FENCE', 'JSONLD_INVALID', 'JSONLD_TYPE',
-  'TAG_UNBALANCED', 'BLOCK_UNBALANCED', 'CONTENT_LOSS', 'WORD_RATIO_EXTREME', 'DUPLICATE_CONTENT',
-  'LAST_CHECKED_WITHOUT_RESEARCH', 'NEW_INTERNAL_LINK', 'BAD_NEW_LINK', 'BOX_DUPLICATED', 'NEW_FAQ_NOT_ALLOWED',
-  'TITLE_IN_BODY', 'INTERNAL_ERROR'
+  'PARSE_MISSING_MARKER', 'PARSE_META_JSON', 'PARSE_EMPTY_HTML', 'CONFIG_MISSING',
+  'IMG_COUNT', 'IMG_CHANGED', 'MEDIA_COUNT', 'MEDIA_CHANGED', 'ELEMENT_COUNT', 'EMBED_URL_MISSING',
+  'SHORTCODE_MISSING', 'SHORTCODE_ADDED', 'LINK_MISSING', 'LINK_ATTR_CHANGED', 'ID_MISSING',
+  'PLUGIN_BLOCK_CHANGED', 'MEDIA_BLOCK_CHANGED', 'BLOCK_MARKUP_MISMATCH', 'BLOCK_COMMENTS_IN_CLASSIC',
+  'SCRIPT_CHANGED', 'SPECIAL_COMMENT_MISSING', 'MALFORMED_COMMENT', 'FORBIDDEN_TAG',
+  'FIRST_ELEMENT_NOT_P', 'STRAY_TEXT', 'HEADING_ORDER', 'PLACEHOLDER', 'MARKDOWN', 'OMISSION_MARKER', 'CODE_FENCE',
+  'JSONLD_INVALID', 'JSONLD_TYPE', 'TAG_UNBALANCED', 'BLOCK_UNBALANCED', 'CONTENT_LOSS', 'CONTENT_RETENTION',
+  'WORD_RATIO_EXTREME', 'DUPLICATE_CONTENT', 'LAST_CHECKED_WITHOUT_RESEARCH', 'LAST_CHECKED_NOT_ALLOWED',
+  'NEW_NUMBER_WITHOUT_RESEARCH', 'NUMBER_MISSING', 'NEW_INTERNAL_LINK', 'BAD_NEW_LINK', 'BOX_DUPLICATED',
+  'SECTION_DUPLICATED', 'NEW_FAQ_NOT_ALLOWED', 'TITLE_IN_BODY', 'INTERNAL_ERROR'
 ];
 
 const WARNING_CODES = [
-  'AI_PHRASE', 'WORD_RATIO_HIGH', 'BOX_LIMIT', 'FAQ_SCHEMA_MISMATCH', 'META_LENGTH', 'NEW_CONCLUSION',
-  'EMOJI_ADDED', 'LINK_IN_HEADING', 'DUPLICATE_NEW_LINK', 'SOURCES_MISMATCH'
+  'AI_PHRASE', 'WORD_RATIO_HIGH', 'BOX_LIMIT', 'FAQ_SCHEMA_MISMATCH', 'META_LENGTH', 'META_JSON_INVALID', 'NEW_CONCLUSION',
+  'EMOJI_ADDED', 'LINK_IN_HEADING', 'DUPLICATE_NEW_LINK', 'SOURCES_MISMATCH', 'NEW_HTML_COMMENT',
+  'LINK_CHECK_UNAVAILABLE', 'LINK_CHECK_INCONCLUSIVE', 'SITE_DOMAINS_INFERRED'
 ];
 
 const BOX_TYPES = [
@@ -62,7 +81,18 @@ const BOX_TYPES = [
 
 const MEDIA_TAGS = ['picture', 'source', 'video', 'audio', 'iframe', 'embed', 'object', 'figure', 'figcaption', 'noscript'];
 const COUNTED_ELEMENTS = ['form', 'button', 'ins'];
-const FORBIDDEN_TAGS = ['h1', 'title', 'html', 'head', 'body', 'style', 'meta', 'link'];
+// Elements whose attributes must stay exactly the same (nth element vs nth element, like <img>).
+const MEDIA_COMPARE_TAGS = ['source', 'iframe', 'video', 'audio', 'embed', 'object', 'track', 'ins', 'form', 'button'];
+const FORBIDDEN_TAGS = ['h1', 'title', 'html', 'head', 'body', 'style', 'meta', 'link',
+  'textarea', 'template', 'xmp', 'plaintext', 'noembed', 'noframes', 'select', 'input', 'base'];
+// Block-level containers: text outside all of them (and outside block comments) is "bare" top-level text.
+const BLOCK_CONTAINER_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'table', 'thead',
+  'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'colgroup', 'blockquote', 'figure', 'figcaption', 'details', 'summary', 'section',
+  'article', 'aside', 'header', 'footer', 'nav', 'main', 'pre', 'form', 'fieldset', 'picture', 'video', 'audio', 'iframe',
+  'object', 'noscript', 'center', 'textarea', 'select', 'button', 'label', 'address', 'map', 'svg', 'math', 'template'];
+// A new <p>-closing block tag implicitly ends an open <p> (HTML parsing rule), so unclosed <p> tags do not hide text.
+const P_CLOSING_TAGS = ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'dl', 'table', 'blockquote', 'figure',
+  'details', 'section', 'article', 'aside', 'header', 'footer', 'nav', 'main', 'pre', 'form', 'fieldset', 'address', 'center'];
 const BALANCED_TAGS = ['p', 'div', 'span', 'ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tr', 'td', 'th', 'details', 'summary',
   'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'a', 'strong', 'em', 'figure', 'figcaption'];
 const VOID_TAGS = ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'source', 'track', 'wbr'];
@@ -74,10 +104,60 @@ const SOURCES_HEADINGS = ['sources', 'source', 'references', 'sources and refere
   'sources et r\u00e9f\u00e9rences', 'r\u00e9f\u00e9rences', 'referenzen', 'referencias', 'riferimenti', 'refer\u00eancias'];
 
 const PLACEHOLDER_PATTERNS = [
-  ['{{', /\{\{/g], ['}}', /\}\}/g], ['[VERIFY', /\[VERIFY/gi], ['[TODO', /\[TODO/gi], ['TODO', /\bTODO\b/g],
-  ['TBD', /\bTBD\b/g], ['href="#"', /\bhref\s*=\s*(["'])#\1/gi], ['REAL-URL', /REAL-URL/gi], ['PASTE YOUR', /PASTE YOUR/g],
+  // "TODO" only in placeholder shapes ([TODO / TODO:), so Spanish/Portuguese "TODO lo que..." is not a placeholder.
+  ['{{', /\{\{/g], ['}}', /\}\}/g], ['[VERIFY', /\[VERIFY/gi], ['[TODO', /\[TODO/gi], ['TODO:', /\bTODO\s*:/g],
+  ['TBD', /\bTBD\b(?!\w)/g], ['href="#"', /\bhref\s*=\s*(["'])#\1/gi], ['REAL-URL', /REAL-URL/gi], ['PASTE YOUR', /PASTE YOUR/g],
   ['lorem ipsum', /lorem ipsum/gi], ['[insert', /\[insert/gi], ['[add ', /\[add /gi], ['[link', /\[link/gi],
-  ['your-site', /your-site/gi], ['yourdomain', /yourdomain/gi], ['example.com', /example\.com/gi]
+  ['your-site', /your-site/gi], ['yourdomain', /yourdomain/gi], ['example.com', /example\.com/gi],
+  ['[bracket placeholder]', /\[(?:your|image|photo|picture|screenshot|chart|graphic|source|citation|url|name|date|year|price|number|brand|product|city|country|author)\b[^\]]{0,80}\]/gi],
+  ['XX', /\bX{2,}\b/g]
+];
+// Placeholder shapes inside JSON-LD string values (FAQ schema).
+const JSONLD_PLACEHOLDER_RE = /\{\{[^}]{0,40}\}\}|\[VERIFY|\[TODO|\bTODO\s*:|\bTBD\b|REAL-URL|PASTE YOUR/i;
+
+// Markdown and search-tool citation artifacts (counted as edited minus original, visible text outside <pre>/<code>).
+const MARKDOWN_PATTERNS = [
+  ['markdown link [text](url)', /\]\((?:https?:|\/)/g],
+  ['markdown bold **text**', /\*\*[^*\s][^*]{0,200}?\*\*/g],
+  ['citation mark 【…】', /【[^】]{0,40}】/g],
+  ['citation mark [cite…]', /\[cite[^\]]{0,20}\]/gi],
+  ['numeric citation [n]', /(?:^|[^\w\]])\[\d{1,2}\](?!\()/g]
+];
+const MARKDOWN_HEADING_RE = /(?:^|\n)[ \t]{0,3}#{1,6}[ \t]+\S/g;
+
+// "Rest of the article unchanged" and similar omission notes (visible text and HTML comments).
+const OMISSION_PATTERNS = [
+  /\b(?:rest|remainder) of (?:the |this )?(?:article|post|content|text|html|page|document)\b/gi,
+  /\b(?:article|post|content|text|html|section|sections|everything else|all else|remaining (?:content|text|sections?|paragraphs?))\s+(?:remains?|stays?|is|are|was|were|left|kept)\s+(?:unchanged|the same|as is|as before|intact)\b/gi,
+  /\bunchanged from (?:the )?original\b/gi,
+  /\[\s*(?:\.\.\.|…)\s*\]/g,
+  /\b(?:omitted|truncated|shortened|abbreviated) for (?:brevity|length|space)\b/gi,
+  /\bcontent (?:continues|omitted|truncated)\b/gi,
+  /\b(?:same|continues) as (?:in )?(?:the )?original\b/gi
+];
+const OMISSION_COMMENT_RE = /unchanged|omitted|truncated|continues|continued|rest of|remainder|same as (?:the )?original|as before|\.\.\.|…|\bsnip\b/i;
+
+// Words of the model's own around the article (chat text). Anchored at the start of a new bare text segment
+// or of the article's visible text; LLM_CHATTER_ANY_RE may appear anywhere (counted as new occurrences).
+const CHATTER_START_RE = new RegExp('^(?:' + [
+  "here(?:'s|\\u2019s| is| are)\\s+(?:the|your)\\b[^.!?]{0,60}?\\b(?:article|html|version|post|content|edit|rewrite|draft)\\b",
+  'below (?:is|are) (?:the|your)\\b',
+  'sure[,!.]', 'certainly[,!.]', 'absolutely[,!.]',
+  "i(?:'ve|\\u2019ve| have)?\\s+(?:kept|made|added|removed|changed|edited|updated|revised|rewrote|rewritten|improved|preserved)\\s+(?:all|every|the|your|some|a few|several|these|those|it|this)\\b[^.!?]{0,40}?\\b(?:images?|links?|article|content|text|headings?|structure|changes|edits|html|markup|shortcodes?|blocks?|formatting|sections?)\\b",
+  '(?:the\\s+)?(?:complete|full|final|fixed|edited|updated|revised|improved|rewritten)\\s+(?:article|html|version)(?:\\s+html)?\\s*:?\\s*$',
+  'article html\\s*:?\\s*$',
+  '(?:```)?\\s*(?:html?|json|xml|markup)\\s*:?\\s*$',
+  'end of (?:the )?(?:article|html)\\b'
+].join('|') + ')', 'i');
+const LLM_CHATTER_ANY_RE = /\blet me know if you(?:'d|’d| would)? (?:like|want|need)\b|\bhope this helps\b|\bas an ai\b|\bas a (?:large )?language model\b|\bi hope (?:this|these) (?:edits?|changes|version|article) help/gi;
+
+// FAQ section headings in the user's languages (a FAQ counts as present when a heading matches).
+const FAQ_HEADING_RE = /\bfaqs?\b|frequently asked|common questions|questions? (?:and|&) answers?|\bq ?& ?a\b|häufig gestellte fragen|häufige fragen|preguntas frecuentes|questions fréquentes|foire aux questions|domande frequenti|perguntas frequentes|veelgestelde vragen|vanliga frågor|ofte stillede spørgsmål|ofte stilte spørsmål|usein kysyt|najczęściej zadawane pytania|często zadawane pytania|sıkça sorulan sorular|часто задаваемые вопросы|সাধারণ প্রশ্ন|প্রায়শই জিজ্ঞাসিত|সচরাচর জিজ্ঞাসিত|अक्सर पूछे जाने वाले/i;
+
+// Freshness / verification claims that need research (webSearchCount 0 => hard error when new).
+const FRESHNESS_PATTERNS = [
+  /\b(?:last updated|updated|verified|fact[- ]checked|reviewed)\b[^.!?]{0,40}\b(?:19|20)\d\d\b/gi,
+  /\b(?:prices|figures|facts|dates|data)\s+(?:were\s+|are\s+|have been\s+)?(?:verified|checked|confirmed)\b/gi
 ];
 
 const AI_PHRASES = [
@@ -103,8 +183,9 @@ const AI_PHRASES = [
 // Shortcode per SPEC: \[\/?[a-z][a-z0-9_-]*(?:\s[^\]]*)?\/?\]  (attribute part bounded for speed)
 const SHORTCODE_SRC = '\\[\\/?[a-z][a-z0-9_-]*(?:\\s[^\\]\\[]{0,4000})?\\/?\\]';
 
-// Tag pattern: quote-aware, bounded, no catastrophic backtracking.
-const ATTRS_SRC = '(?:[^<>"\']|"[^"]{0,10000}"|\'[^\']{0,10000}\')*';
+// Tag pattern: quote-aware, no catastrophic backtracking (the three alternatives start with different characters).
+// Quoted values are not length-capped, so big data-URI images are still seen as <img> tags.
+const ATTRS_SRC = '(?:[^<>"\']|"[^"]*"|\'[^\']*\')*';
 const TAG_SRC = '<(\\/?)([a-zA-Z][a-zA-Z0-9:-]*)(?=[\\s\\/>])(' + ATTRS_SRC + ')>';
 
 const NAMED_ENTITIES = {
@@ -194,6 +275,67 @@ function uniq(list) {
     if (!seen.has(x)) { seen.add(x); out.push(x); }
   }
   return out;
+}
+
+/** CRLF / CR line endings -> LF, so a Windows-saved original and the model's LF output compare equal. */
+function normalizeNewlines(s) {
+  s = toStr(s);
+  return s.indexOf('\r') < 0 ? s : s.replace(/\r\n?/g, '\n');
+}
+
+/** Entries of multiset `b` that occur more often than in multiset `a`: [[key, extra], ...]. */
+function multisetExcess(a, b) {
+  const out = [];
+  for (const entry of b) {
+    const d = entry[1] - (a.get(entry[0]) || 0);
+    if (d > 0) out.push([entry[0], d]);
+  }
+  return out;
+}
+
+/** Sorted [start, end) ranges of well-formed HTML comments. */
+function commentRanges(html) {
+  const out = [];
+  let pos = 0;
+  for (;;) {
+    const s = html.indexOf('<!--', pos);
+    if (s < 0) break;
+    const e = html.indexOf('-->', s + 4);
+    if (e < 0) break;
+    out.push([s, e + 3]);
+    pos = e + 3;
+  }
+  return out;
+}
+
+/** Ranges the link sanitizer must never touch: scripts (incl. JSON-LD), <style> elements and HTML comments. */
+function protectedRanges(html) {
+  const ranges = scanScripts(html).map(function (s) { return [s.start, s.end]; });
+  if (html.toLowerCase().indexOf('<style') >= 0) {
+    for (const st of scanElements(html, ['style'], true)) ranges.push([st.start, st.end]);
+  }
+  for (const c of commentRanges(html)) ranges.push(c);
+  ranges.sort(function (a, b) { return a[0] - b[0]; });
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+  return merged;
+}
+
+/** true when index `i` lies inside one of the sorted, non-overlapping ranges (binary search). */
+function inRanges(ranges, i) {
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (ranges[mid][0] > i) hi = mid - 1;
+    else if (ranges[mid][1] <= i) lo = mid + 1;
+    else return true;
+  }
+  return false;
 }
 
 /** Removes <script>, <style> (and optionally other raw-text elements) with an O(n) scan. */
@@ -360,16 +502,29 @@ function elementEnd(html, pos, name) {
 /* ------------------------------------------------------------------ */
 
 const INLINE_TAG_RE_SRC = '<\\/?(?:' + INLINE_TAGS.join('|') + ')(?=[\\s>/])' + ATTRS_SRC + '>';
+// Shared global regexes: only ever used with String.prototype.replace (which resets lastIndex itself).
+const INLINE_TAG_RE_G = new RegExp(INLINE_TAG_RE_SRC, 'gi');
+const ANY_TAG_RE_G = new RegExp('<\\/?[a-zA-Z][a-zA-Z0-9:-]*(?=[\\s>/])' + ATTRS_SRC + '>', 'g');
+const SHORTCODE_RE_G = new RegExp(SHORTCODE_SRC, 'gi');
 
 /** Visible text: scripts/styles/comments removed, inline tags removed, block tags -> space, entities decoded. */
 function visibleText(html, opts) {
   opts = opts || {};
   let s = opts.isMarkup ? toStr(html) : markupOf(html);
-  s = s.replace(new RegExp(INLINE_TAG_RE_SRC, 'gi'), '');
-  s = s.replace(new RegExp('<\\/?[a-zA-Z][a-zA-Z0-9:-]*(?=[\\s>/])' + ATTRS_SRC + '>', 'g'), ' ');
+  if (s.indexOf('<') >= 0) {
+    s = s.replace(INLINE_TAG_RE_G, '');
+    s = s.replace(ANY_TAG_RE_G, ' ');
+  }
   s = decodeEntities(s);
-  if (opts.stripShortcodes) s = s.replace(new RegExp(SHORTCODE_SRC, 'gi'), ' ');
+  if (opts.stripShortcodes && s.indexOf('[') >= 0) s = s.replace(SHORTCODE_RE_G, ' ');
   return s.replace(/[\s\u00a0\u1680\u2000-\u200b\u2028\u2029\u202f\u205f\u3000\ufeff]+/g, ' ').trim();
+}
+
+/** Text with line structure kept (tags -> newline), <pre>/<code> removed: used to spot markdown "## Heading" lines. */
+function lineText(markup) {
+  let s = toStr(markup);
+  if (/<(?:pre|code)(?=[\s>\/])/i.test(s)) s = removeRawElements(s, ['pre', 'code'], '\n');
+  return decodeEntities(s.replace(ANY_TAG_RE_G, '\n'));
 }
 
 function countWords(text) {
@@ -435,6 +590,52 @@ function hostMatches(host, domains) {
   return false;
 }
 
+// Second-level labels under which a country code needs three labels (bbc.co.uk, abc.net.au, gov.uk...).
+const SECOND_LEVEL_LABELS = ['co', 'com', 'org', 'net', 'gov', 'ac', 'edu', 'gob', 'go', 'or', 'ne', 'nic', 'mil', 'ltd', 'plc', 'sch', 'nhs', 'police'];
+
+/** Approximate registrable domain ("www.bbc.co.uk" -> "bbc.co.uk", "en.example.com" -> "example.com"). */
+function registrableHost(host) {
+  host = normalizeHost(host);
+  if (!host || host.charAt(0) === '[' || /^[\d.]+$/.test(host)) return host;
+  const labels = host.split('.');
+  if (labels.length <= 2) return host;
+  const tld = labels[labels.length - 1];
+  const sld = labels[labels.length - 2];
+  if (tld.length === 2 && SECOND_LEVEL_LABELS.indexOf(sld) >= 0) return labels.slice(-3).join('.');
+  return labels.slice(-2).join('.');
+}
+
+/**
+ * Own-site domains guessed from the original when options.siteDomains is empty: the hosts that serve its
+ * /wp-content/uploads/ files (images, links to media), as registrable domains. Jetpack CDN (i0.wp.com/site/...) unwrapped.
+ */
+function inferSiteDomains(originalHtml) {
+  const out = [];
+  const re = /(?:https?:)?\/\/([a-z0-9.-]+\.[a-z]{2,})(?::\d+)?\/((?:[a-z0-9.-]+\.[a-z]{2,}\/)?)wp-content\/uploads\//gi;
+  const s = toStr(originalHtml);
+  let m;
+  let guard = 0;
+  while ((m = re.exec(s)) && guard++ < 5000) {
+    let host = m[1].toLowerCase();
+    if (/^i\d\.wp\.com$/.test(host) && m[2]) host = m[2].slice(0, -1).toLowerCase();
+    const r = registrableHost(host);
+    if (r && out.indexOf(r) < 0) out.push(r);
+  }
+  return out;
+}
+
+/** Fills opts.siteDomains from the original when it is empty (sets opts.siteDomainsInferred). */
+function resolveSiteDomains(opts, originalHtml) {
+  if (!opts.siteDomains.length) {
+    const inferred = inferSiteDomains(originalHtml);
+    if (inferred.length) {
+      opts.siteDomains = inferred;
+      opts.siteDomainsInferred = true;
+    }
+  }
+  return opts;
+}
+
 function toList(v) {
   if (Array.isArray(v)) return v.map(toStr);
   if (typeof v === 'string') return v.split(/[,\s]+/);
@@ -453,18 +654,27 @@ function normalizeOptions(options) {
   else if (o.webSearchCount === false || (typeof o.webSearchCount === 'string' && /^\s*no\s*$/i.test(o.webSearchCount))) wsc = 0;
   let allowNewFaq = true;
   if (o.allowNewFaq === false || (typeof o.allowNewFaq === 'string' && /^\s*(no|false|off|0)\s*$/i.test(o.allowNewFaq))) allowNewFaq = false;
+  let lastCheckedLine = 'auto';
+  if (o.lastCheckedLine === false || (typeof o.lastCheckedLine === 'string' && /^\s*(no|false|off|0)\s*$/i.test(o.lastCheckedLine))) lastCheckedLine = 'no';
+  else if (o.lastCheckedLine === true || (typeof o.lastCheckedLine === 'string' && /^\s*(yes|true|on|1)\s*$/i.test(o.lastCheckedLine))) lastCheckedLine = 'yes';
+  const todayM = typeof o.today === 'string' ? /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/.exec(o.today) : null;
   const num = function (v, d) { return typeof v === 'number' && isFinite(v) ? v : d; };
   return {
     siteDomains: siteDomains,
+    siteDomainsInferred: false,
     webSearchCount: wsc,
     allowNewFaq: allowNewFaq,
+    lastCheckedLine: lastCheckedLine,
+    today: todayM ? todayM[1] + '-' + todayM[2] + '-' + todayM[3] : '',
     minWordRatio: num(o.minWordRatio, 0.8),
     maxWordRatio: num(o.maxWordRatio, 5),
+    minRetention: num(o.minRetention, 0.75),
     forbiddenLinkDomains: uniq(forbidden.map(normalizeHost).filter(Boolean)),
     checkLinks: o.checkLinks !== false,
     fetchFn: typeof o.fetchFn === 'function' ? o.fetchFn : undefined,
     linkTimeoutMs: num(o.linkTimeoutMs, 10000),
     linkConcurrency: num(o.linkConcurrency, 4),
+    verifiedUrls: uniq(toList(o.verifiedUrls).map(function (u) { return decodeEntities(u).trim(); }).filter(Boolean)),
     meta: o.meta && typeof o.meta === 'object' ? o.meta : null,
     deadUrls: Array.isArray(o.deadUrls) ? o.deadUrls : [],
     postTitle: typeof o.postTitle === 'string' ? o.postTitle : ''
@@ -475,16 +685,22 @@ function isBareHomepage(p) {
   return (p.path === '' || p.path === '/') && !p.query;
 }
 
+/**
+ * url -> removal reason. Entries: a string (dead), { url, verdict: 'dead' }, or { url, reason } with reason
+ * 'dead' | 'redirect' | 'unverified'. Objects with another verdict (e.g. a checkLinks 'ok'/'unknown' result) are ignored.
+ */
 function normalizeDeadList(deadUrls) {
-  const s = new Set();
+  const s = new Map();
   for (const d of (Array.isArray(deadUrls) ? deadUrls : [])) {
     let u = d;
+    let reason = 'dead';
     if (d && typeof d === 'object') {
-      if (d.verdict && d.verdict !== 'dead') continue;
+      if (d.reason) reason = toStr(d.reason);
+      else if (d.verdict && d.verdict !== 'dead') continue;
       u = d.url;
     }
     u = decodeEntities(toStr(u)).trim();
-    if (u) s.add(u);
+    if (u && !s.has(u)) s.set(u, reason);
   }
   return s;
 }
@@ -492,7 +708,7 @@ function normalizeDeadList(deadUrls) {
 /**
  * Decides what to do with a NEW link (href not in the original). Returns null (keep) or a reason string.
  * Reasons: fragment, javascript, not_web_link, relative, bad_scheme, invalid_url, internal, forbidden_domain,
- * dead, deep_link_without_research.
+ * redirect, dead, unverified, deep_link_without_research.
  */
 function decideNewLink(href, opts, deadSet) {
   const h = decodeEntities(toStr(href)).trim();
@@ -508,9 +724,65 @@ function decideNewLink(href, opts, deadSet) {
   if (!p.validHost) return 'invalid_url';
   if (hostMatches(p.host, opts.siteDomains)) return 'internal';
   if (hostMatches(p.host, opts.forbiddenLinkDomains)) return 'forbidden_domain';
-  if (deadSet && deadSet.has(h)) return 'dead';
+  if (hostMatches(p.host, REDIRECT_LINK_DOMAINS) || SEARCH_REDIRECT_RE.test(h)) return 'redirect';
+  if (deadSet && deadSet.has(h)) return typeof deadSet.get === 'function' ? (deadSet.get(h) || 'dead') : 'dead';
   if (opts.webSearchCount === 0 && !isBareHomepage(p)) return 'deep_link_without_research';
   return null;
+}
+
+/** Removes tracking parameters (utm_*, gclid, fbclid, srsltid...) from a URL; returns it unchanged when there are none. */
+function stripTrackingParamsFromUrl(url) {
+  const q = url.indexOf('?');
+  if (q < 0) return url;
+  const hashAt = url.indexOf('#', q);
+  const base = url.slice(0, q);
+  const query = url.slice(q + 1, hashAt < 0 ? url.length : hashAt);
+  const hash = hashAt < 0 ? '' : url.slice(hashAt);
+  const parts = query.split('&');
+  const kept = parts.filter(function (part) {
+    let name = part.split('=')[0];
+    try { name = decodeURIComponent(name); } catch (e) { /* keep raw */ }
+    return part !== '' && !TRACKING_PARAM_RE.test(name.trim());
+  });
+  if (kept.length === parts.filter(function (x) { return x !== ''; }).length) return url;
+  return base + (kept.length ? '?' + kept.join('&') : '') + hash;
+}
+
+function escapeAttr(s) {
+  return toStr(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/**
+ * Rewrites the href of every NEW <a> (not in the original, outside scripts/styles/comments) without tracking parameters.
+ * Returns { html, changed: [{ from, to }] }.
+ */
+function stripTrackingParams(originalHtml, editedHtml, origHrefs) {
+  let html = toStr(editedHtml);
+  const changed = [];
+  if (!/[?&](?:amp;)?(?:utm_|srsltid|gclid|gclsrc|dclid|fbclid|msclkid|mc_[ce]id|_ga|_gl|yclid|gad_source|igshid)/i.test(html)) {
+    return { html: html, changed: changed };
+  }
+  origHrefs = origHrefs || hrefSet(originalHtml);
+  const prot = protectedRanges(html);
+  const re = new RegExp('<a(?=[\\s>/])(' + ATTRS_SRC + ')>', 'gi');
+  let out = '';
+  let pos = 0;
+  let m;
+  while ((m = re.exec(html))) {
+    if (inRanges(prot, m.index)) continue;
+    const attrs = parseAttrs(m[1]);
+    if (!Object.prototype.hasOwnProperty.call(attrs, 'href')) continue;
+    const href = attrs.href.trim();
+    if (origHrefs.has(href)) continue;
+    const clean = stripTrackingParamsFromUrl(href);
+    if (clean === href) continue;
+    const newTag = m[0].replace(/(\shref\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s"'<>`]+)/i, function (all, pre) { return pre + '"' + escapeAttr(clean) + '"'; });
+    out += html.slice(pos, m.index) + newTag;
+    pos = m.index + m[0].length;
+    changed.push({ from: href, to: clean });
+  }
+  if (!changed.length) return { html: html, changed: changed };
+  return { html: out + html.slice(pos), changed: changed };
 }
 
 /** Set of decoded href values of <a>/<area> tags (scripts and comments ignored). */
@@ -554,7 +826,7 @@ function stripOuterFence(s, langRe) {
 }
 
 function parseEditorOutput(text) {
-  const res = { ok: false, status: null, html: '', meta: null, errors: [] };
+  const res = { ok: false, status: null, html: '', meta: null, errors: [], warnings: [] };
   const err = function (code, message) { res.errors.push({ code: code, message: message }); };
   if (typeof text !== 'string' || !text.length) {
     err('PARSE_MISSING_MARKER', 'The editor reply is empty.');
@@ -593,9 +865,17 @@ function parseEditorOutput(text) {
     }
   }
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
-    err('PARSE_META_JSON', 'META section is not a valid JSON object.');
-    res.html = html;
-    return res;
+    // META is only logged (apart from web_research_used). A formatting slip such as an unescaped 17" must not
+    // throw away a good article: when the status can still be read, continue with defaults and the stricter
+    // web_research_used = false.
+    const sm = /"status"\s*:\s*"\s*(edited|skipped)\s*"/i.exec(metaText);
+    if (!sm || Array.isArray(meta)) {
+      err('PARSE_META_JSON', 'META section is not a valid JSON object.');
+      res.html = html;
+      return res;
+    }
+    meta = { status: sm[1].toLowerCase(), web_research_used: false };
+    res.warnings.push({ code: 'META_JSON_INVALID', message: 'META is not valid JSON; only its status ("' + meta.status + '") was used, and web_research_used is treated as false.' });
   }
   const status = typeof meta.status === 'string' ? meta.status.trim().toLowerCase() : '';
   if (status !== 'edited' && status !== 'skipped') {
@@ -623,8 +903,8 @@ function parseEditorOutput(text) {
 
 /** Unique decoded hrefs of <a> tags in the edited HTML that are not hrefs in the original. */
 function findNewLinks(originalHtml, editedHtml, options) {
-  const orig = hrefSet(originalHtml);
-  return uniq(hrefList(editedHtml).filter(function (h) { return !orig.has(h); }));
+  const orig = hrefSet(normalizeNewlines(originalHtml));
+  return uniq(hrefList(normalizeNewlines(editedHtml)).filter(function (h) { return !orig.has(h); }));
 }
 
 /* ------------------------------------------------------------------ */
@@ -712,6 +992,39 @@ function checkLinks(urls, opts) {
     });
   }
 
+  // Accepts fetch-style { status }, n8n/request-style { statusCode } and string statuses.
+  function statusOf(r) {
+    if (!r || typeof r !== 'object') return null;
+    const v = typeof r.status === 'number' ? r.status : (typeof r.statusCode === 'number' ? r.statusCode :
+      (/^\d{3}$/.test(toStr(r.status)) ? Number(r.status) : (/^\d{3}$/.test(toStr(r.statusCode)) ? Number(r.statusCode) : null)));
+    return v;
+  }
+  // HTTP status carried by a thrown error (axios: e.response.status, n8n: e.httpCode / e.statusCode).
+  function errorStatus(e) {
+    if (!e || typeof e !== 'object') return null;
+    const s = (e.response && (e.response.status || e.response.statusCode)) || e.statusCode || e.httpCode || e.status;
+    return /^\d{3}$/.test(toStr(s)) ? Number(s) : null;
+  }
+  // A 2xx/3xx answer that is really a failure: a deep URL redirected to the homepage (soft 404),
+  // or a redirect to a domain-parking host.
+  function softFailure(url, finalUrl) {
+    if (!finalUrl || typeof finalUrl !== 'string') return '';
+    const a = parseUrl(url);
+    const b = parseUrl(finalUrl);
+    if (!a || !b) return '';
+    if (b.host !== a.host && hostMatches(b.host, PARKING_HOSTS)) return 'redirected to a domain-parking page (' + b.host + ')';
+    const deep = a.path !== '' && a.path !== '/';
+    if (deep && (b.path === '' || b.path === '/') && registrableHost(a.host) === registrableHost(b.host)) {
+      return 'soft 404: redirected to the homepage';
+    }
+    return '';
+  }
+  function finishOk(result) {
+    const soft = softFailure(result.url, result.finalUrl);
+    if (soft) { result.verdict = 'dead'; result.error = soft; }
+    return result;
+  }
+
   async function checkOne(url) {
     const result = { url: url, status: null, verdict: 'unknown', error: '' };
     if (!fetchFn) { result.error = 'no fetch function available'; return result; }
@@ -725,10 +1038,12 @@ function checkLinks(urls, opts) {
     let headError = null;
     try {
       const r = await request(url, 'HEAD');
-      headStatus = r && typeof r.status === 'number' ? r.status : null;
-      if (r && r.url) result.finalUrl = r.url;
+      headStatus = statusOf(r);
+      if (r && typeof r.url === 'string' && r.url) result.finalUrl = r.url;
     } catch (e) {
       headError = e;
+      headStatus = errorStatus(e);
+      if (headStatus !== null) headError = null;
     }
     if (headError) {
       const c = classifyFetchError(headError);
@@ -737,22 +1052,31 @@ function checkLinks(urls, opts) {
       result.status = headStatus;
       result.verdict = 'ok';
       result.method = 'HEAD';
-      return result;
+      return finishOk(result);
     }
     // Fallback: GET (for 403/405/501, other errors, and network errors).
     try {
       const r = await request(url, 'GET');
-      const st = r && typeof r.status === 'number' ? r.status : null;
+      const st = statusOf(r);
       result.status = st;
       result.method = 'GET';
-      if (r && r.url) result.finalUrl = r.url;
+      if (r && typeof r.url === 'string' && r.url) result.finalUrl = r.url;
       result.verdict = st === null ? 'unknown' : classifyStatus(st);
       if (result.verdict !== 'ok') result.error = 'HTTP ' + st + (headStatus !== null ? ' (HEAD ' + headStatus + ')' : '');
+      else finishOk(result);
     } catch (e) {
-      const c = classifyFetchError(e);
-      result.status = headStatus;
-      result.verdict = c.verdict;
-      result.error = c.error;
+      const es = errorStatus(e);
+      result.method = 'GET';
+      if (es !== null) {
+        result.status = es;
+        result.verdict = classifyStatus(es);
+        result.error = result.verdict === 'ok' ? '' : 'HTTP ' + es + (headStatus !== null ? ' (HEAD ' + headStatus + ')' : '');
+      } else {
+        const c = classifyFetchError(e);
+        result.status = headStatus;
+        result.verdict = c.verdict;
+        result.error = c.error;
+      }
     }
     return result;
   }
@@ -920,6 +1244,8 @@ function balancedCut(html, s, e) {
 
 function sanitizeLinks(originalHtml, editedHtml, options, deadUrls) {
   const opts = normalizeOptions(options);
+  originalHtml = normalizeNewlines(originalHtml);
+  resolveSiteDomains(opts, originalHtml);
   const origHrefs = hrefSet(originalHtml);
   const deadSet = normalizeDeadList(deadUrls === undefined ? opts.deadUrls : deadUrls);
   const removed = [];
@@ -935,10 +1261,14 @@ function sanitizeLinks(originalHtml, editedHtml, options, deadUrls) {
     if (origHrefs.has(h)) return null;
     return decideNewLink(h, opts, deadSet);
   };
-  let html = toStr(editedHtml);
+  // 0) Tracking parameters (utm_source=openai, gclid, ...) are removed from new links.
+  const tracked = stripTrackingParams(originalHtml, normalizeNewlines(editedHtml), origHrefs);
+  let html = tracked.html;
+  // Anchors inside scripts (document.write widgets, JSON-LD text), <style> and comments are never touched.
+  let prot = protectedRanges(html);
 
   // 1) Sources lists: drop whole items whose only link(s) get removed; drop an emptied section.
-  const sections = findSourcesSections(html);
+  const sections = findSourcesSections(html).filter(function (sec) { return !inRanges(prot, sec.headingStart); });
   for (let i = sections.length - 1; i >= 0; i--) {
     const sec = sections[i];
     const listHtml = html.slice(sec.listStart, sec.listEnd);
@@ -972,11 +1302,13 @@ function sanitizeLinks(originalHtml, editedHtml, options, deadUrls) {
   }
 
   // 2) Unwrap every other removable new link (keep its anchor text).
+  if (sections.length) prot = protectedRanges(html);
   const anchors = scanElements(html, ['a'], true);
   if (anchors.length) {
     let out = '';
     let pos = 0;
     for (const a of anchors) {
+      if (inRanges(prot, a.start)) continue;
       const attrs = parseAttrs(a.attrStr);
       if (!Object.prototype.hasOwnProperty.call(attrs, 'href')) continue;
       let reason = decide(attrs.href);
@@ -988,7 +1320,7 @@ function sanitizeLinks(originalHtml, editedHtml, options, deadUrls) {
     }
     html = out + html.slice(pos);
   }
-  return { html: html, removed: removed };
+  return { html: html, removed: removed, changed: tracked.changed };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1025,17 +1357,28 @@ function analyze(html) {
   const open = {};
   const close = {};
   const imgs = [];
+  const imgAnchors = [];
   const ids = [];
+  const anchors = [];
+  const media = {};
+  for (const t of MEDIA_COMPARE_TAGS) media[t] = [];
   const boxes = {};
   for (const b of BOX_TYPES) boxes[b.key] = 0;
   const boxRes = BOX_TYPES.map(function (b) { return new RegExp('background(?:-color)?\\s*:\\s*#' + b.color + '(?![0-9a-f])', 'i'); });
   let eventAttrs = 0;
+  let lastHeadingId = '';
   forEachTag(A.markup, function (t) {
     if (t.closing) { close[t.name] = (close[t.name] || 0) + 1; return; }
     open[t.name] = (open[t.name] || 0) + 1;
-    if (t.attrStr.indexOf('=') < 0 && t.name !== 'img') return;
+    const isMedia = Object.prototype.hasOwnProperty.call(media, t.name);
+    if (t.attrStr.indexOf('=') < 0 && t.name !== 'img' && !isMedia) return;
     const attrs = parseAttrs(t.attrStr);
-    if (t.name === 'img') imgs.push(attrs);
+    if (t.name === 'img') { imgs.push(attrs); imgAnchors.push(lastHeadingId); }
+    if (isMedia) media[t.name].push(attrs);
+    if (/^h[1-6]$/.test(t.name) && attrs.id) lastHeadingId = attrs.id;
+    if (t.name === 'a' && Object.prototype.hasOwnProperty.call(attrs, 'href')) {
+      anchors.push({ href: attrs.href.trim(), rel: toStr(attrs.rel).toLowerCase().split(/\s+/).filter(Boolean) });
+    }
     if (Object.prototype.hasOwnProperty.call(attrs, 'id') && attrs.id !== '') ids.push(attrs.id);
     for (const k of Object.keys(attrs)) if (/^on[a-z]+$/.test(k)) eventAttrs++;
     if (attrs.style) {
@@ -1047,12 +1390,19 @@ function analyze(html) {
   A.open = open;
   A.close = close;
   A.imgs = imgs;
+  A.imgAnchors = imgAnchors;
+  // Every <img opener, even one whose attributes are broken (unclosed quote) and so not parsed as a tag.
+  A.rawImgCount = countMatches(A.markup, /<img(?=[\s\/>])/gi);
+  A.media = media;
+  A.anchors = anchors;
   A.ids = ids;
   A.boxes = boxes;
   A.eventAttrs = eventAttrs;
   A.hrefs = hrefSet(A.markup, true);
   A.text = visibleText(A.markup, { isMarkup: true });
-  A.words = countWords(A.text.replace(new RegExp(SHORTCODE_SRC, 'gi'), ' '));
+  A.wordList = A.text.replace(SHORTCODE_RE_G, ' ').toLowerCase()
+    .match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}]|[\p{L}\p{N}][\p{L}\p{N}\p{M}'\u2019_.-]*/gu) || [];
+  A.words = A.wordList.length;
   A.headings = scanElements(A.markupNoPlugin, ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'], true).map(function (h) {
     return { level: parseInt(h.name.charAt(1), 10), text: visibleText(h.inner), inner: h.inner };
   });
@@ -1070,14 +1420,106 @@ function analyze(html) {
       hasFaq: types.indexOf('FAQPage') >= 0
     };
   });
+  // Script openers that are not complete JSON-LD blocks (catches unclosed <script src=...> too).
+  A.nonJsonLdScriptOpeners = countMatches(stripComments(html), /<script(?=[\s>\/])/gi) - A.jsonld.length;
+  A.badComments = countBadComments(html);
+  A.plainComments = plainComments(html);
   const scRe = new RegExp(SHORTCODE_SRC, 'gi');
   A.shortcodes = A.markup.match(scRe) || [];
+  A.embedUrls = embedUrlLines(A.markup);
   return A;
+}
+
+/** Counts "<!--" that never close, or whose comment body contains another "<!--" (a stray or nested opener). */
+function countBadComments(html) {
+  html = removeRawElements(toStr(html), ['script', 'style'], ' ');
+  let bad = 0;
+  let pos = 0;
+  for (;;) {
+    const s = html.indexOf('<!--', pos);
+    if (s < 0) break;
+    const e = html.indexOf('-->', s + 4);
+    if (e < 0) { bad++; break; }
+    const inner = html.indexOf('<!--', s + 4);
+    if (inner >= 0 && inner < e) bad++;
+    pos = e + 3;
+  }
+  return bad;
+}
+
+/** Bodies (whitespace-collapsed) of well-formed comments that are not block delimiters or more/nextpage/noteaser. */
+function plainComments(html) {
+  html = removeRawElements(toStr(html), ['script', 'style'], ' ');
+  const out = [];
+  for (const r of commentRanges(html)) {
+    const body = html.slice(r[0] + 4, r[1] - 3).replace(/\s+/g, ' ').trim();
+    if (/^\/?wp:/.test(body) || /^(?:more\b|nextpage$|noteaser$)/i.test(body)) continue;
+    out.push(body);
+  }
+  return out;
+}
+
+/** URLs that stand alone on a line (optionally in <p>/<div>/<figure>): classic oEmbed lines and wp:embed wrapper text. */
+function embedUrlLines(markup) {
+  const out = [];
+  if (markup.indexOf('http') < 0) return out;
+  for (const line of markup.split('\n')) {
+    if (line.length > 2100 || line.indexOf('http') < 0) continue;
+    const t = decodeEntities(line.replace(/<\/?(?:p|div|figure|span|center)(?=[\s>\/])[^<>]*>/gi, '')).trim();
+    if (/^https?:\/\/[^\s<>"']+$/i.test(t)) out.push(t);
+  }
+  return out;
+}
+
+const BLOCK_CONTAINER_SET = {};
+for (const t of BLOCK_CONTAINER_TAGS) BLOCK_CONTAINER_SET[t] = true;
+const P_CLOSING_SET = {};
+for (const t of P_CLOSING_TAGS) P_CLOSING_SET[t] = true;
+
+/**
+ * Visible text that sits outside every block-level element ("bare" top-level text), split into wpautop-style
+ * paragraphs (blank lines). In block-editor content this is text between blocks; in classic content it is
+ * text written without <p>. `markup` is the comment/script-free view.
+ */
+function bareTextSegments(markup) {
+  const segs = [];
+  const re = new RegExp(TAG_SRC, 'g');
+  const stack = [];
+  const count = {};
+  let last = 0;
+  let m;
+  while ((m = re.exec(markup))) {
+    const name = m[2].toLowerCase();
+    if (BLOCK_CONTAINER_SET[name] !== true) continue;
+    if (!stack.length && m.index > last) segs.push(markup.slice(last, m.index));
+    last = m.index + m[0].length;
+    if (m[1] === '/') {
+      if (count[name]) {
+        const i = stack.lastIndexOf(name);
+        for (let k = i; k < stack.length; k++) count[stack[k]]--;
+        stack.length = i;
+      }
+    } else if (!/\/\s*$/.test(m[3])) {
+      if (count.p && stack[stack.length - 1] === 'p' && P_CLOSING_SET[name]) { stack.pop(); count.p--; }
+      stack.push(name);
+      count[name] = (count[name] || 0) + 1;
+    }
+  }
+  if (!stack.length && markup.length > last) segs.push(markup.slice(last));
+  const out = [];
+  for (const seg of segs) {
+    if (!/\S/.test(seg)) continue;
+    for (const chunk of seg.split(/\n[ \t\u00a0]*\n/)) {
+      const t = visibleText(chunk, { isMarkup: true, stripShortcodes: true });
+      if (t) out.push(t);
+    }
+  }
+  return out;
 }
 
 function hasFaq(A) {
   if (A.jsonld.some(function (j) { return j.hasFaq; })) return true;
-  if (A.allHeadings.some(function (h) { return /faq|frequently asked/i.test(h.text); })) return true;
+  if (A.allHeadings.some(function (h) { return FAQ_HEADING_RE.test(h.text); })) return true;
   if (A.open.details) return true;
   if (A.blocks.some(function (b) { return b.name === 'yoast/faq-block' || b.name === 'rank-math/faq-block'; })) return true;
   return false;
@@ -1177,6 +1619,14 @@ function leadingItem(html) {
         if (sc) return { kind: 'shortcode', tag: 'p', key: sc[0], raw: short(el, 160) };
         return { kind: 'p', tag: 'p', raw: short(el, 160), text: plain };
       }
+      if (INLINE_TAGS.indexOf(tag) >= 0 && text) {
+        // An inline wrapper with text at the very top (Google-Docs <span style="font-weight: 400;">, <strong>Brand</strong> ...)
+        // is intro text, like a bare text node: the editor may rewrite it.
+        const lt2 = html.indexOf('<', end);
+        const seg2 = html.slice(pos, lt2 < 0 ? n : lt2);
+        const firstLine2 = visibleText(seg2.split(/\n/)[0] || '');
+        return { kind: 'text', tag: tag, raw: short(el, 160), text: visibleText(seg2), firstLine: firstLine2 || text };
+      }
       const ot = new RegExp(TAG_SRC, 'y');
       ot.lastIndex = pos;
       const openTag = ot.exec(html);
@@ -1197,7 +1647,9 @@ function leadingItem(html) {
     const lt = html.indexOf('<', pos);
     const seg = html.slice(pos, lt < 0 ? n : lt);
     if (!visibleText(seg, { stripShortcodes: true })) { pos = lt < 0 ? n : lt; continue; }
-    return { kind: 'text', raw: short(seg, 120), text: visibleText(seg) };
+    // firstLine: wpautop turns a single newline into <br> and a blank line into a new paragraph, so a bare
+    // title line above the intro is only the first line of this text.
+    return { kind: 'text', raw: short(seg, 120), text: visibleText(seg), firstLine: visibleText(seg.split(/\n/)[0] || '') };
   }
   return { kind: 'empty' };
 }
@@ -1229,6 +1681,161 @@ function lastCheckedSnippets(text) {
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F1E6}-\u{1F1FF}]/u;
 
 /* ------------------------------------------------------------------ */
+/* Helpers used by validateArticle                                      */
+/* ------------------------------------------------------------------ */
+
+const CUR_SYM_SRC = '[$\\u20ac\\u00a3\\u00a5\\u20b9\\u09f3\\u20a9\\u20bd\\u20ba]';
+const NUM_SRC = '\\d(?:[\\d,.]*\\d)?';
+const RANGE_SRC = '\\s*(?:-|\\u2013|\\u2014|to|bis|a|\\u00e0)\\s*';
+// Currency words ("pounds" is left out on purpose: it is also a weight unit).
+const CUR_WORD_SRC = '(?:(?:us\\s?|u\\.s\\.\\s?)?dollars?|usd|euros?|eur|gbp|aud|cad|nzd|sek|nok|dkk|chf|pln|z\\u0142|kr|inr|rupees?|bdt|taka|yen|jpy)';
+const FIG_CUR_PRE_RE = new RegExp('(' + CUR_SYM_SRC + ')\\s?(' + NUM_SRC + ')(?:' + RANGE_SRC + CUR_SYM_SRC + '?\\s?(' + NUM_SRC + '))?', 'g');
+const FIG_CUR_SUF_RE = new RegExp('(' + NUM_SRC + ')(?:' + RANGE_SRC + '(' + NUM_SRC + '))?\\s?(' + CUR_SYM_SRC + '|' + CUR_WORD_SRC + '(?![\\p{L}]))', 'giu');
+const FIG_PCT_RE = new RegExp('(' + NUM_SRC + ')(?:' + RANGE_SRC + '(' + NUM_SRC + '))?\\s?(?:%|percent(?![\\p{L}])|per cent(?![\\p{L}])|prozent(?![\\p{L}])|por ciento(?![\\p{L}])|pour cent(?![\\p{L}]))', 'giu');
+const FIG_YEAR_RE = /(?<!\d)(?:19|20)\d\d(?!\d)/g;
+const FIG_NUM_RE = new RegExp(NUM_SRC, 'g');
+
+function normFigure(n) {
+  return toStr(n).replace(/[,\s  ']/g, '').replace(/\.+$/, '').replace(/\.0{1,2}$/, '');
+}
+
+/**
+ * Figures a no-research edit must neither invent nor drop: currency amounts, percentages and years.
+ * Returns { tokens: Map(display -> numeric value), numbers: Set(every number in the text) }.
+ */
+function figureInfo(text) {
+  const t = toStr(text);
+  const tokens = new Map();
+  const numbers = new Set();
+  let m;
+  const add = function (display, value) { if (value && !tokens.has(display)) tokens.set(display, value); };
+  FIG_CUR_PRE_RE.lastIndex = 0;
+  while ((m = FIG_CUR_PRE_RE.exec(t))) {
+    add(m[1] + normFigure(m[2]), normFigure(m[2]));
+    if (m[3]) add(m[1] + normFigure(m[3]), normFigure(m[3]));
+  }
+  FIG_CUR_SUF_RE.lastIndex = 0;
+  while ((m = FIG_CUR_SUF_RE.exec(t))) {
+    const cur = m[3].toLowerCase();
+    add(normFigure(m[1]) + ' ' + cur, normFigure(m[1]));
+    if (m[2]) add(normFigure(m[2]) + ' ' + cur, normFigure(m[2]));
+  }
+  FIG_PCT_RE.lastIndex = 0;
+  while ((m = FIG_PCT_RE.exec(t))) {
+    add(normFigure(m[1]) + '%', normFigure(m[1]));
+    if (m[2]) add(normFigure(m[2]) + '%', normFigure(m[2]));
+  }
+  FIG_YEAR_RE.lastIndex = 0;
+  while ((m = FIG_YEAR_RE.exec(t))) add(m[0], m[0]);
+  FIG_NUM_RE.lastIndex = 0;
+  while ((m = FIG_NUM_RE.exec(t))) numbers.add(normFigure(m[0]));
+  return { tokens: tokens, numbers: numbers };
+}
+
+/** Share of the original's words (multiset) that are still present in the edit. */
+function wordRetention(O, E) {
+  if (!O.wordList.length) return 1;
+  const cE = new Map();
+  for (const w of E.wordList) cE.set(w, (cE.get(w) || 0) + 1);
+  const cO = new Map();
+  for (const w of O.wordList) cO.set(w, (cO.get(w) || 0) + 1);
+  let hit = 0;
+  for (const entry of cO) hit += Math.min(entry[1], cE.get(entry[0]) || 0);
+  return hit / O.wordList.length;
+}
+
+/** Heading/list blocks whose comment does not match the tag (wp:heading level vs <hN>, wp:list ordered vs <ol>). */
+function blockMarkupMismatches(A) {
+  const out = [];
+  for (const t of A.tokens) {
+    if (t.closing || t.selfClosing || (t.name !== 'heading' && t.name !== 'list')) continue;
+    const jm = /^<!--\s*wp:[a-z0-9_\/-]+\s*([\s\S]*?)\s*-->$/.exec(t.raw);
+    let attrs = {};
+    if (jm && jm[1] && jm[1].charAt(0) === '{') {
+      try { attrs = JSON.parse(jm[1]); } catch (e) { continue; }
+    }
+    if (!attrs || typeof attrs !== 'object') attrs = {};
+    const after = A.raw.slice(t.end, t.end + 400);
+    if (t.name === 'heading') {
+      const hm = /^\s*<h([1-6])(?=[\s>\/])/i.exec(after);
+      if (!hm) continue;
+      const want = typeof attrs.level === 'number' ? attrs.level : 2;
+      if (Number(hm[1]) !== want) out.push(short(t.raw, 60) + ' wraps <h' + hm[1] + '>');
+    } else {
+      const lm = /^\s*<(ul|ol)(?=[\s>\/])/i.exec(after);
+      if (!lm) continue;
+      const isOl = lm[1].toLowerCase() === 'ol';
+      if (isOl !== (attrs.ordered === true)) out.push(short(t.raw, 60) + ' wraps <' + lm[1].toLowerCase() + '>');
+    }
+  }
+  return out;
+}
+
+/** String values of a JSON-LD object that are empty or hold a placeholder. */
+function jsonLdPlaceholders(data) {
+  const bad = [];
+  let seen = 0;
+  const visit = function (v, depth) {
+    if (depth > 12 || ++seen > 20000 || bad.length > 5) return;
+    if (typeof v === 'string') {
+      if (!v.trim()) bad.push('(empty text)');
+      else if (JSONLD_PLACEHOLDER_RE.test(v)) bad.push(v);
+    } else if (Array.isArray(v)) {
+      for (const x of v) visit(x, depth + 1);
+    } else if (v && typeof v === 'object') {
+      for (const k of Object.keys(v)) visit(v[k], depth + 1);
+    }
+  };
+  visit(data, 0);
+  return bad;
+}
+
+/** Headings that may keep a skipped level: the first heading, the first after a title H1, and jump targets. */
+function headingJumpKeys(headings) {
+  const keys = new Set();
+  const key = function (h) { return h.level + '|' + normalizeForMatch(h.text); };
+  let prev = 0;
+  let seenNonTitle = false;
+  for (const h of headings) {
+    if (h.level === 1) { prev = 1; continue; }
+    if (!seenNonTitle && h.level !== 2) keys.add(key(h));
+    seenNonTitle = true;
+    if (prev && h.level > prev + 1) keys.add(key(h));
+    prev = h.level;
+  }
+  return keys;
+}
+
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+
+/** Patterns for today's date in common written forms (numeric forms work in any language). */
+function todayDatePatterns(today) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(toStr(today));
+  if (!m) return [];
+  const y = m[1];
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const mm = (mo < 10 ? '0?' : '') + mo;
+  const dd = (d < 10 ? '0?' : '') + d;
+  const name = MONTH_NAMES[mo - 1] || 'x';
+  const mon = '(?:' + name + '|' + name.slice(0, 3) + '\\.?)';
+  return [
+    new RegExp('\\b' + y + '-' + m[2] + '-' + m[3] + '\\b', 'g'),
+    new RegExp('\\b' + dd + '[./-]\\s?' + mm + '[./-]\\s?' + y + '\\b', 'g'),
+    new RegExp('\\b' + mm + '/' + dd + '/' + y + '\\b', 'g'),
+    new RegExp('\\b' + mon + '\\s+' + d + '(?:st|nd|rd|th)?,?\\s+' + y + '\\b', 'gi'),
+    new RegExp('\\b' + d + '(?:st|nd|rd|th)?\\.?\\s+(?:of\\s+)?' + mon + ',?\\s+' + y + '\\b', 'gi')
+  ];
+}
+
+const BLOCK_BREAK_RE_G = new RegExp('<\\/?(?:' + BLOCK_CONTAINER_TAGS.join('|') + '|hr)(?=[\\s>/])' + ATTRS_SRC + '>', 'gi');
+const CHATTER_END_RE = /(?:^|[.!?]\s+)i(?:'ve|’ve| have)?\s+(?:kept|made|added|removed|changed|edited|updated|revised|rewrote|rewritten|improved|preserved)\s+(?:all|every|the|your|some|a few|several|these|those|it|this)\b[^.!?]{0,40}?\b(?:images?|links?|article|content|text|headings?|structure|changes|edits|html|markup|shortcodes?|blocks?|formatting|sections?)\b[^.!?]{0,120}[.!?]?\s*$/i;
+
+function isFaqHeading(h) {
+  return FAQ_HEADING_RE.test(h.text) && !/\?\s*$/.test(h.text);
+}
+
+/* ------------------------------------------------------------------ */
 /* 5. validateArticle                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -1246,15 +1853,25 @@ function validateArticle(originalHtml, editedHtml, options) {
   const error = function (code, message) { push(errors, code, message); };
   const warn = function (code, message) { push(warnings, code, message); };
 
-  const O = analyze(originalHtml);
-  const E = analyze(editedHtml);
+  // CRLF (Windows) originals compare equal to the model's LF output.
+  const originalN = normalizeNewlines(originalHtml);
+  resolveSiteDomains(opts, originalN);
+  if (opts.siteDomainsInferred) {
+    warn('SITE_DOMAINS_INFERRED', 'No site domain given; using ' + opts.siteDomains.join(', ') + ' (from the original\'s upload URLs).');
+  }
+  const O = analyze(originalN);
+  const E = analyze(normalizeNewlines(editedHtml));
   const edited = E.raw;
+  const origIdSet = new Set(O.ids);
 
   // --- Images -----------------------------------------------------------
   if (O.imgs.length !== E.imgs.length) {
     error('IMG_COUNT', 'Image count changed: original ' + O.imgs.length + ', edited ' + E.imgs.length + '.');
+  } else if (O.rawImgCount !== E.rawImgCount) {
+    error('IMG_COUNT', '<img> tag count changed (including broken tags): original ' + O.rawImgCount + ', edited ' + E.rawImgCount + '.');
   }
   const nImg = Math.min(O.imgs.length, E.imgs.length);
+  const idsE = new Set(E.ids);
   for (let i = 0; i < nImg; i++) {
     const a = O.imgs[i];
     const b = E.imgs[i];
@@ -1262,6 +1879,15 @@ function validateArticle(originalHtml, editedHtml, options) {
     const diff = keys.filter(function (k) { return a[k] !== b[k]; });
     if (diff.length) {
       error('IMG_CHANGED', 'Image #' + (i + 1) + ' (' + short(a.src || b.src || '', 80) + ') changed attribute(s): ' + diff.join(', ') + '.');
+    }
+    if (O.imgs.length === E.imgs.length) {
+      // Moved to another section: the nearest heading id above it is now a different original heading.
+      const ha = O.imgAnchors[i];
+      const hb = E.imgAnchors[i];
+      if (ha !== hb && (hb === '' ? idsE.has(ha) : origIdSet.has(hb))) {
+        error('IMG_CHANGED', 'Image #' + (i + 1) + ' (' + short(a.src || '', 60) + ') moved to another section (' +
+          (ha ? 'was under #' + ha : 'was above the first heading') + ', now ' + (hb ? 'under #' + hb : 'above #' + ha) + ').');
+      }
     }
   }
 
@@ -1276,6 +1902,20 @@ function validateArticle(originalHtml, editedHtml, options) {
     const b = E.open[t] || 0;
     if (a !== b) error('ELEMENT_COUNT', '<' + t + '> count changed: original ' + a + ', edited ' + b + '.');
   }
+  for (const t of MEDIA_COMPARE_TAGS) {
+    const la = O.media[t];
+    const lb = E.media[t];
+    const n = Math.min(la.length, lb.length);
+    for (let i = 0; i < n; i++) {
+      const keys = uniq(Object.keys(la[i]).concat(Object.keys(lb[i])));
+      const diff = keys.filter(function (k) { return la[i][k] !== lb[i][k]; });
+      if (diff.length) error('MEDIA_CHANGED', '<' + t + '> #' + (i + 1) + ' changed attribute(s): ' + diff.join(', ') + '.');
+    }
+  }
+  const euE = multiset(E.embedUrls);
+  for (const entry of multiset(O.embedUrls)) {
+    if ((euE.get(entry[0]) || 0) < entry[1]) error('EMBED_URL_MISSING', 'Embed URL line (video/post embed) missing, moved into text or linked: ' + short(entry[0], 100));
+  }
 
   // --- Shortcodes -----------------------------------------------------------
   const scO = multiset(O.shortcodes);
@@ -1284,16 +1924,37 @@ function validateArticle(originalHtml, editedHtml, options) {
     const have = scE.get(entry[0]) || 0;
     if (have < entry[1]) error('SHORTCODE_MISSING', 'Shortcode missing or changed: ' + short(entry[0], 100));
   }
+  for (const entry of multisetExcess(scO, scE)) {
+    error('SHORTCODE_ADDED', 'New shortcode or [bracketed] text: ' + short(entry[0], 100));
+  }
 
   // --- Links and ids -----------------------------------------------------------
   for (const h of O.hrefs) {
     if (!E.hrefs.has(h)) error('LINK_MISSING', 'Original link removed or changed: ' + short(h, 120));
   }
-  const idsE = new Set(E.ids);
+  const relNeeded = new Map();
+  for (const a of O.anchors) {
+    const toks = ['nofollow', 'sponsored', 'ugc'].filter(function (t) { return a.rel.indexOf(t) >= 0; });
+    relNeeded.set(a.href, relNeeded.has(a.href) ? relNeeded.get(a.href).filter(function (t) { return toks.indexOf(t) >= 0; }) : toks);
+  }
+  const relReported = new Set();
+  for (const a of E.anchors) {
+    const need = relNeeded.get(a.href);
+    if (!need || !need.length || relReported.has(a.href)) continue;
+    const miss = need.filter(function (t) { return a.rel.indexOf(t) < 0; });
+    if (miss.length) {
+      relReported.add(a.href);
+      error('LINK_ATTR_CHANGED', 'Link ' + short(a.href, 100) + ' lost rel="' + miss.join(' ') + '".');
+    }
+  }
   const oLead = leadingItem(O.raw);
+  // The post title (an H1 that is the original's first heading, even below a leading image) may be deleted with its id.
+  const titleIsFirstHeading = (oLead.kind === 'element' && oLead.tag === 'h1') ||
+    (O.headings.length > 0 && O.headings[0].level === 1);
   let titleIds = new Set();
-  if (oLead.kind === 'element' && oLead.tag === 'h1' && !E.open.h1) {
-    titleIds = new Set(parseAttrsIds(oLead.raw));
+  if (titleIsFirstHeading && !E.open.h1) {
+    const h1 = scanElements(O.markupNoPlugin, ['h1'], true)[0];
+    if (h1) titleIds = new Set(parseAttrsIds(O.markupNoPlugin.slice(h1.start, h1.end)));
   }
   for (const id of uniq(O.ids)) {
     if (!idsE.has(id) && !titleIds.has(id)) error('ID_MISSING', 'id="' + short(id, 80) + '" from the original is missing.');
@@ -1331,6 +1992,13 @@ function validateArticle(originalHtml, editedHtml, options) {
       error('BLOCK_UNBALANCED', 'Block wp:' + name + ' has ' + Math.abs(bbE[name]) + ' unmatched opener/closer comment(s).');
     }
   }
+  if (!O.tokens.length && E.tokens.length) {
+    // In WordPress, one block comment makes has_blocks() true and switches off wpautop for the whole post.
+    error('BLOCK_COMMENTS_IN_CLASSIC', 'Block comments (<!-- wp:... -->) added to a classic-editor article (' + E.tokens.length + ').');
+  }
+  for (const entry of multisetExcess(multiset(blockMarkupMismatches(O)), multiset(blockMarkupMismatches(E)))) {
+    error('BLOCK_MARKUP_MISMATCH', 'Block comment does not match its tag: ' + entry[0] + '.');
+  }
 
   // --- Scripts and JSON-LD --------------------------------------------------------------
   const scriptKey = function (s) { return s.raw; };
@@ -1344,10 +2012,15 @@ function validateArticle(originalHtml, editedHtml, options) {
     if ((sE.get(entry[0]) || 0) < entry[1]) error('SCRIPT_CHANGED', 'Script changed or removed: ' + short(entry[0], 100));
   }
   const origScriptSet = new Set(O.scripts.map(scriptKey));
+  const faqPluginO = O.blocks.some(function (b) { return b.name === 'yoast/faq-block' || b.name === 'rank-math/faq-block'; });
+  const faqLdO = O.jsonld.some(function (j) { return j.hasFaq; });
   for (const j of E.jsonld) {
     if (origScriptSet.has(j.raw)) continue;
     if (!j.valid) { error('JSONLD_INVALID', 'JSON-LD block is not valid JSON: ' + short(j.raw, 100)); continue; }
     if (!j.isFaq) error('JSONLD_TYPE', 'New JSON-LD block with @type ' + (j.types.join(', ') || '(none)') + ' (only FAQPage may be added).');
+    else if (faqPluginO && !faqLdO) error('JSONLD_TYPE', 'New FAQPage JSON-LD although the FAQ is a plugin block (the plugin already outputs FAQ schema).');
+    const bad = jsonLdPlaceholders(j.data);
+    if (bad.length) error('PLACEHOLDER', 'Placeholder or empty value inside JSON-LD: ' + bad.map(function (x) { return '"' + short(x, 40) + '"'; }).join(', '));
   }
   const faqBlocksE = E.jsonld.filter(function (j) { return j.hasFaq; }).length;
   const faqBlocksO = O.jsonld.filter(function (j) { return j.hasFaq; }).length;
@@ -1360,19 +2033,23 @@ function validateArticle(originalHtml, editedHtml, options) {
     const b = countMatches(edited, sp[1]);
     if (b < a) error('SPECIAL_COMMENT_MISSING', sp[0] + ' missing: original ' + a + ', edited ' + b + '.');
   }
+  if (E.badComments > O.badComments) {
+    error('MALFORMED_COMMENT', 'Unclosed or nested "<!--" added (' + (E.badComments - O.badComments) + '): it can hide the rest of the page.');
+  }
 
   // --- Forbidden tags --------------------------------------------------------------------
   for (const t of FORBIDDEN_TAGS) {
     let a = O.open[t] || 0;
-    // The original's leading H1 is the post title that must be deleted; it gives no allowance for another H1.
-    if (t === 'h1' && oLead.kind === 'element' && oLead.tag === 'h1') a = Math.max(0, a - 1);
+    // The original's title H1 must be deleted; it gives no allowance for another H1.
+    if (t === 'h1' && titleIsFirstHeading) a = Math.max(0, a - 1);
     const b = E.open[t] || 0;
     if (b > a) error('FORBIDDEN_TAG', 'New <' + t + '> tag(s) added (' + (b - a) + ').');
   }
   const doctypeRe = /<!doctype\b/gi;
   if (countMatches(edited, doctypeRe) > countMatches(O.raw, doctypeRe)) error('FORBIDDEN_TAG', 'New <!doctype> added.');
-  const plainScripts = function (A) { return A.scripts.filter(function (s) { return !s.isJsonLd; }).length; };
-  if (plainScripts(E) > plainScripts(O)) error('FORBIDDEN_TAG', 'New <script> tag(s) added (' + (plainScripts(E) - plainScripts(O)) + ').');
+  if (E.nonJsonLdScriptOpeners > O.nonJsonLdScriptOpeners) {
+    error('FORBIDDEN_TAG', 'New or unclosed <script> tag(s) added (' + (E.nonJsonLdScriptOpeners - O.nonJsonLdScriptOpeners) + ').');
+  }
   if (E.eventAttrs > O.eventAttrs) error('FORBIDDEN_TAG', 'New inline event handler attribute(s) (on...=) added.');
 
   // --- First element --------------------------------------------------------------------
@@ -1390,26 +2067,60 @@ function validateArticle(originalHtml, editedHtml, options) {
     }
   }
   if (opts.postTitle && (eLead.kind === 'p' || eLead.kind === 'text' || eLead.kind === 'element')) {
-    const a = looseNormalize(eLead.text || '');
     const b = looseNormalize(opts.postTitle);
-    if (a && b && a === b) error('TITLE_IN_BODY', 'The article starts with a line that only repeats the post title.');
+    const a1 = looseNormalize(eLead.text || '');
+    const a2 = looseNormalize(eLead.firstLine || '');
+    if (b && (a1 === b || a2 === b)) error('TITLE_IN_BODY', 'The article starts with a line that only repeats the post title.');
   }
 
-  // --- Headings -------------------------------------------------------------------------
+  // --- Stray text: the model's own words around or between the article's parts ------------
+  const bareO = bareTextSegments(O.markup);
+  const bareE = bareTextSegments(E.markup);
+  const bareShow = new Map();
+  for (const s of bareE) bareShow.set(normalizeForMatch(s), s);
+  const newBare = multisetExcess(multiset(bareO.map(normalizeForMatch)), multiset(bareE.map(normalizeForMatch)));
+  let strayFound = false;
+  for (const entry of newBare) {
+    const shown = bareShow.get(entry[0]) || entry[0];
+    // Original without any bare text (block editor, or fully wrapped classic): any new bare text is stray.
+    // Original with bare-text paragraphs (classic wpautop): only chat-like lines.
+    if (!bareO.length || CHATTER_START_RE.test(shown)) {
+      strayFound = true;
+      error('STRAY_TEXT', 'Text outside the article\'s paragraphs/blocks: "' + short(shown, 90) + '"');
+    }
+  }
+  if (!strayFound && O.tokens.length && eLead.kind === 'text' && oLead.kind !== 'text') {
+    strayFound = true;
+    error('STRAY_TEXT', 'The article starts with text outside any block: "' + short(eLead.text || eLead.raw, 90) + '"');
+  }
+  if (!strayFound && CHATTER_START_RE.test(E.text.slice(0, 300)) && !CHATTER_START_RE.test(O.text.slice(0, 300))) {
+    error('STRAY_TEXT', 'The article starts with chat text: "' + short(E.text, 90) + '"');
+  }
+  if (CHATTER_END_RE.test(E.text.slice(-400)) && !CHATTER_END_RE.test(O.text.slice(-400))) {
+    error('STRAY_TEXT', 'The article ends with a note about the edit: "' + short(E.text.slice(-120), 90) + '"');
+  }
+  if (countMatches(E.text, LLM_CHATTER_ANY_RE) > countMatches(O.text, LLM_CHATTER_ANY_RE)) {
+    error('STRAY_TEXT', 'Chat text added (for example "let me know if you would like...", "hope this helps").');
+  }
+
+  // --- Headings (relative: a skipped level the original already had at the same heading is kept) ----------
   if (E.headings.length) {
-    if (E.headings[0].level !== 2) {
-      error('HEADING_ORDER', 'The first heading must be <h2>; found <h' + E.headings[0].level + '> "' + short(E.headings[0].text, 60) + '".');
+    const allowed = headingJumpKeys(O.headings);
+    const key = function (h) { return h.level + '|' + normalizeForMatch(h.text); };
+    const firstReal = E.headings[0];
+    if (firstReal.level !== 2 && !(firstReal.level > 2 && allowed.has(key(firstReal)))) {
+      error('HEADING_ORDER', 'The first heading must be <h2>; found <h' + firstReal.level + '> "' + short(firstReal.text, 60) + '".');
     }
     for (let i = 1; i < E.headings.length; i++) {
       const prev = E.headings[i - 1].level;
       const cur = E.headings[i].level;
-      if (cur > prev + 1) {
+      if (cur > prev + 1 && !allowed.has(key(E.headings[i]))) {
         error('HEADING_ORDER', 'Heading level jumps from h' + prev + ' to h' + cur + ' at "' + short(E.headings[i].text, 60) + '".');
       }
     }
   }
 
-  // --- Placeholders / fences ------------------------------------------------------------
+  // --- Placeholders / fences / markdown / omission notes ------------------------------------------
   const found = [];
   for (const p of PLACEHOLDER_PATTERNS) {
     const d = countMatches(E.markup, p[1]) - countMatches(O.markup, p[1]);
@@ -1417,6 +2128,39 @@ function validateArticle(originalHtml, editedHtml, options) {
   }
   if (found.length) error('PLACEHOLDER', 'Placeholder text added: ' + found.join(', '));
   if (countOccurrences(edited, '```') > countOccurrences(O.raw, '```')) error('CODE_FENCE', 'Markdown code fence (```) found in the HTML.');
+  const noCodeText = function (A) {
+    return /<(?:pre|code)(?=[\s>\/])/i.test(A.markup) ? visibleText(removeRawElements(A.markup, ['pre', 'code'], ' '), { isMarkup: true }) : A.text;
+  };
+  const tcO = noCodeText(O);
+  const tcE = noCodeText(E);
+  const md = [];
+  for (const p of MARKDOWN_PATTERNS) {
+    const d = countMatches(tcE, p[1]) - countMatches(tcO, p[1]);
+    if (d > 0) md.push(p[0] + (d > 1 ? ' (x' + d + ')' : ''));
+  }
+  if (E.markup.indexOf('#') >= 0) {
+    const dh = countMatches(lineText(E.markup), MARKDOWN_HEADING_RE) - countMatches(lineText(O.markup), MARKDOWN_HEADING_RE);
+    if (dh > 0) md.push('markdown heading "## ..."' + (dh > 1 ? ' (x' + dh + ')' : ''));
+  }
+  if (md.length) error('MARKDOWN', 'Markdown or search-tool citation marks in the HTML: ' + md.join(', '));
+  const om = [];
+  for (const re of OMISSION_PATTERNS) {
+    if (countMatches(E.text, re) > countMatches(O.text, re)) {
+      re.lastIndex = 0;
+      const m = re.exec(E.text);
+      re.lastIndex = 0;
+      om.push('"' + short(m ? m[0] : re.source, 60) + '"');
+    }
+  }
+  const newComments = multisetExcess(multiset(O.plainComments), multiset(E.plainComments));
+  for (const entry of newComments) {
+    if (OMISSION_COMMENT_RE.test(entry[0]) || OMISSION_PATTERNS.some(function (re) { re.lastIndex = 0; const r = re.test(entry[0]); re.lastIndex = 0; return r; })) {
+      om.push('comment <!-- ' + short(entry[0], 60) + ' -->');
+    } else {
+      warn('NEW_HTML_COMMENT', 'New HTML comment (it is published in the page source): <!-- ' + short(entry[0], 80) + ' -->');
+    }
+  }
+  if (om.length) error('OMISSION_MARKER', 'Part of the article looks skipped ("rest unchanged" note): ' + om.join(', '));
 
   // --- Tag balance ---------------------------------------------------------------------------
   for (const t of BALANCED_TAGS) {
@@ -1427,17 +2171,32 @@ function validateArticle(originalHtml, editedHtml, options) {
 
   // --- Words -----------------------------------------------------------------------------
   const ratio = O.words ? E.words / O.words : (E.words ? Infinity : 1);
+  // A very thin original may legitimately grow to about 600 words.
+  const extremeLimit = O.words ? Math.max(opts.maxWordRatio, 600 / O.words) : opts.maxWordRatio;
   if (ratio < opts.minWordRatio) {
     error('CONTENT_LOSS', 'Visible text shrank to ' + Math.round(ratio * 100) + '% of the original (' + E.words + ' vs ' + O.words + ' words).');
   }
-  if (ratio > opts.maxWordRatio) {
+  if (ratio > extremeLimit) {
     error('WORD_RATIO_EXTREME', 'Visible text grew ' + (isFinite(ratio) ? ratio.toFixed(1) + 'x' : 'from nothing') + ' (' + E.words + ' vs ' + O.words + ' words): runaway or duplicated output.');
   } else if (ratio > 3) {
     warn('WORD_RATIO_HIGH', 'Visible text grew ' + ratio.toFixed(1) + 'x (' + E.words + ' vs ' + O.words + ' words).');
   }
+  const retention = wordRetention(O, E);
+  if (O.words >= 100 && retention < opts.minRetention) {
+    error('CONTENT_RETENTION', 'Only ' + Math.round(retention * 100) + '% of the original\'s words are still in the edit (minimum ' +
+      Math.round(opts.minRetention * 100) + '%): whole parts were probably dropped.');
+  }
 
   // --- Duplicate content --------------------------------------------------------------------
+  const classicMode = !O.tokens.length;
   const blockTexts = function (A) {
+    if (classicMode) {
+      // Classic content: paragraphs are blank-line separated text (wpautop) as well as block elements.
+      return A.markup.replace(BLOCK_BREAK_RE_G, '\n\n').split(/\n[ \t ]*\n/)
+        .filter(function (c) { return c.length <= 20000 && /\S/.test(c); })
+        .map(function (c) { return normalizeForMatch(visibleText(c, { isMarkup: true })); })
+        .filter(function (t) { return countWords(t) >= 12; });
+    }
     // Leaf paragraphs/items only (bounded size): broken or nested markup must not make this quadratic.
     return scanElements(A.markup, ['p', 'li'], false)
       .filter(function (el) { return el.contentEnd - el.contentStart <= 5000 && !/<(?:p|li)(?=[\s>\/])/i.test(el.inner); })
@@ -1452,14 +2211,40 @@ function validateArticle(originalHtml, editedHtml, options) {
     }
   }
 
-  // --- Last checked -------------------------------------------------------------------------
+  // --- Last checked, freshness claims, figures without research ------------------------------------
+  const lcO = multiset(lastCheckedSnippets(O.text));
+  const lcE = multiset(lastCheckedSnippets(E.text));
+  const lcNew = multisetExcess(lcO, lcE);
   if (opts.webSearchCount === 0) {
-    const lcO = multiset(lastCheckedSnippets(O.text));
-    const lcE = multiset(lastCheckedSnippets(E.text));
-    for (const entry of lcE) {
-      if ((lcO.get(entry[0]) || 0) < entry[1]) {
-        error('LAST_CHECKED_WITHOUT_RESEARCH', 'A new or changed "Last checked" line was added without any web research: "' + short(entry[0], 60) + '"');
+    for (const entry of lcNew) {
+      error('LAST_CHECKED_WITHOUT_RESEARCH', 'A new or changed "Last checked" line was added without any web research: "' + short(entry[0], 60) + '"');
+    }
+    for (const re of FRESHNESS_PATTERNS) {
+      if (countMatches(E.text, re) > countMatches(O.text, re)) {
+        re.lastIndex = 0;
+        const m = re.exec(E.text);
+        re.lastIndex = 0;
+        error('LAST_CHECKED_WITHOUT_RESEARCH', 'An "updated"/"verified" claim was added without any web research: "' + short(m ? m[0] : '', 60) + '"');
       }
+    }
+    for (const re of todayDatePatterns(opts.today)) {
+      if (countMatches(E.text, re) > countMatches(O.text, re)) {
+        error('LAST_CHECKED_WITHOUT_RESEARCH', 'Today\'s date (' + opts.today + ') was added without any web research.');
+        break;
+      }
+    }
+    const fO = figureInfo(O.text);
+    const fE = figureInfo(E.text);
+    const added = [];
+    for (const entry of fE.tokens) if (!fO.tokens.has(entry[0]) && !fO.numbers.has(entry[1])) added.push(entry[0]);
+    if (added.length) error('NEW_NUMBER_WITHOUT_RESEARCH', 'New price, percentage or year without any web research: ' + added.slice(0, 10).join(', '));
+    const lost = [];
+    for (const entry of fO.tokens) if (!fE.tokens.has(entry[0]) && !fE.numbers.has(entry[1])) lost.push(entry[0]);
+    if (lost.length) error('NUMBER_MISSING', 'Price, percentage or year from the original is gone: ' + lost.slice(0, 10).join(', '));
+  }
+  if (opts.lastCheckedLine === 'no') {
+    for (const entry of lcNew) {
+      error('LAST_CHECKED_NOT_ALLOWED', 'A new or changed "Last checked" line was added although "Last checked line" is "no": "' + short(entry[0], 60) + '"');
     }
   }
 
@@ -1491,6 +2276,17 @@ function validateArticle(originalHtml, editedHtml, options) {
       if (b.hard) error('BOX_DUPLICATED', b.label + ' box appears ' + c + ' times (max ' + Math.max(b.max, a) + ').');
       else warn('BOX_LIMIT', b.label + ' boxes: ' + c + ' (limit ' + Math.max(b.max, a) + ').');
     }
+  }
+  // Rule 5: never a second FAQ, Sources list or Last checked line.
+  const sectionCounts = [
+    ['FAQ section', function (A) { return A.allHeadings.filter(isFaqHeading).length; }],
+    ['Sources section', function (A) { return A.allHeadings.filter(function (h) { return isSourcesHeadingText(h.text); }).length; }],
+    ['"Last checked" line', function (A) { return lastCheckedSnippets(A.text).length; }]
+  ];
+  for (const sc of sectionCounts) {
+    const a = sc[1](O);
+    const c = sc[1](E);
+    if (c > Math.max(1, a)) error('SECTION_DUPLICATED', sc[0] + ' appears ' + c + ' times (max ' + Math.max(1, a) + ').');
   }
 
   // --- FAQ ------------------------------------------------------------------------------------------
